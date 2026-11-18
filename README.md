@@ -4,9 +4,13 @@
 [![Platform: Google Cloud Run](https://img.shields.io/badge/Google%20Cloud-Cloud%20Run%20%2B%20BigQuery-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
 [![Security: Zero-Trust IAP Ready](https://img.shields.io/badge/Security-IAP%20Zero--Trust%20%7C%20Non--Root-10B981)](#security--privacy-by-design)
 
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2FMoshikoAvraham1402%2Fantigravity-org-dashboard.git&cloudshell_tutorial=docs%2Fcloudshell_tutorial.md)
+
 An enterprise-grade, turnkey observability and FinOps web application for monitoring **Google Antigravity** (`businessaicode.googleapis.com`) adoption, active engineers, agentic trajectory depth, token economics, prompt cache ROI, and actual Cloud Billing invoices across an entire **Google Cloud Organization**.
 
-Deployable into **your own Google Cloud environment** in under 5 minutes via a single CLI command (`./install.sh`) or **Terraform**, ensuring 100% data sovereignty inside your tenant.
+Deployable into **your own Google Cloud environment** in under 5 minutes via **1-Click Google Cloud Shell**, a single CLI command (`./install.sh`), or **Terraform** — ensuring 100% data sovereignty inside your tenant.
+
+![Executive Overview Preview](docs/images/preview-overview.png)
 
 ---
 
@@ -65,18 +69,40 @@ flowchart LR
 
 Plus a built-in **Sync Data** button in the top navigation bar that queries live Cloud Logging metadata across all accessible GCP projects on demand and appends new events directly into BigQuery without duplicates.
 
+### Workspace Previews *(Shown with synthetic `acme.example` demo data)*
+
+| Models, Reasoning Effort & Fleet Hygiene | FinOps & Live Cloud Billing SKU Ledger |
+| :---: | :---: |
+| ![Models, Effort & Fleet](docs/images/preview-models-fleet.png) | ![FinOps & Cloud Billing](docs/images/preview-finops-billing.png) |
+
+<details>
+<summary><strong>Click to expand: Engineers, Autonomous Trajectories &amp; Live Profile Drawer</strong></summary>
+<br/>
+
+![Engineers & Trajectories Drawer](docs/images/preview-trajectories-drawer.png)
+
+</details>
+
 ---
 
-## Quickstart: One-Command Installation (5 Minutes)
+## Quickstart: Deploy in Under 5 Minutes
 
-### Prerequisites
-1. **Google Cloud SDK (`gcloud` & `bq`)** and **Python 3.10+** installed (or run directly inside **Google Cloud Shell**, where everything is pre-installed).
+### Option 1: 1-Click Deployment in Google Cloud Shell (Zero Local Setup)
+
+Click the button below to clone this repository directly inside **Google Cloud Shell** and launch an interactive step-by-step deployment walkthrough (`gcloud`, `bq`, and `python3` are pre-installed):
+
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2FMoshikoAvraham1402%2Fantigravity-org-dashboard.git&cloudshell_tutorial=docs%2Fcloudshell_tutorial.md)
+
+### Option 2: CLI Installer from Your Terminal
+
+#### Prerequisites
+1. **Google Cloud SDK (`gcloud` & `bq`)** and **Python 3.10+** installed.
 2. A **GCP Project** with Billing enabled to host BigQuery and Cloud Run.
 3. Permissions:
    - Host project: `Owner` or `Editor` + `Project IAM Admin` (`roles/resourcemanager.projectIamAdmin`) + `Cloud Run Admin` (`roles/run.admin`).
    - Organization level *(recommended for org-wide telemetry)*: `Logs Configuration Writer` (`roles/logging.configWriter`) on your GCP Organization so the aggregated sink captures all child projects automatically.
 
-### Run the Turnkey Installer
+#### Run the Turnkey Installer
 
 ```bash
 git clone https://github.com/MoshikoAvraham1402/antigravity-org-dashboard.git
@@ -194,6 +220,7 @@ Changes take effect immediately on the next dashboard refresh without redeployin
 
 ## Documentation
 
+- [**Interactive Cloud Shell Tutorial (`docs/cloudshell_tutorial.md`)**](docs/cloudshell_tutorial.md) — Guided browser-based deployment walkthrough for Google Cloud Shell.
 - [**Enterprise Installation & Upgrade Guide (`docs/INSTALLATION.md`)**](docs/INSTALLATION.md) — Detailed setup for Org/Folder/Project sinks, IAP Zero-Trust access, Cloud Billing linking, and cross-project `Sync Data` IAM.
 - [**Architecture & Security Whitepaper (`docs/ARCHITECTURE_AND_SECURITY.md`)**](docs/ARCHITECTURE_AND_SECURITY.md) — Telemetry log schemas (`InferenceResponseLog` & `ClientTelemetryLog`), deduplication design, and defense-in-depth controls.
 - [**Troubleshooting Guide (`docs/TROUBLESHOOTING.md`)**](docs/TROUBLESHOOTING.md) — Solutions for GCP Org Policies (`iam.allowedPolicyMemberDomains`), BigQuery dataset regions, Day-0 sink creation, and IAP permissions.
@@ -221,9 +248,13 @@ Changes take effect immediately on the next dashboard refresh without redeployin
 │   ├── harden_cloud_run_security.py   # Runtime SA, dataset-scoped IAM & IAP/Public hardening
 │   └── bigquery_views.sql             # Reference templated SQL views
 ├── terraform/                         # Declarative Terraform IaC module for enterprise platform teams
-└── docs/                              # Installation, Architecture/Security & Troubleshooting guides
+└── docs/                              # Cloud Shell tutorial, Installation, Security & UI previews
 ```
 
-## License
+---
+
+## Disclaimer & License
+
+> **Disclaimer:** This is an open-source community solution accelerator and is **not** an officially supported Google product.
 
 Licensed under the [Apache License 2.0](LICENSE).
