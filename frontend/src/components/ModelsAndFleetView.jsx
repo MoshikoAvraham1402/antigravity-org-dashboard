@@ -3,6 +3,7 @@ import ReactECharts from 'echarts-for-react';
 import { Cpu, Brain, ShieldCheck, ArrowUpCircle, FolderGit2, Filter, Download } from 'lucide-react';
 import MetricTooltip from './MetricTooltip';
 import {
+  escapeHtml,
   formatCompactNumber,
   formatCurrency,
   formatFullNumber,
@@ -49,11 +50,11 @@ export default function ModelsAndFleetView({
           if (!params?.length) return '';
           const m = top[params[0].dataIndex] || {};
           return `
-            <div style="font-weight:700;margin-bottom:5px">${m.label} (${m.provider})</div>
+            <div style="font-weight:700;margin-bottom:5px">${escapeHtml(m.label)} (${escapeHtml(m.provider)})</div>
             <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.55">
-              Turns: <b>${formatFullNumber(m.requests)}</b> · Users: <b>${m.active_users}</b><br/>
-              Total Tokens: <b>${formatCompactNumber(m.total_tokens)}</b> (Cache <b>${m.cache_hit_rate_pct}%</b>)<br/>
-              Avg Context: <b>${formatCompactNumber(m.avg_prompt_tokens)}</b> · &gt;200K: <b>${m.long_context_pct}%</b><br/>
+              Turns: <b>${formatFullNumber(m.requests)}</b> · Users: <b>${Number(m.active_users || 0)}</b><br/>
+              Total Tokens: <b>${formatCompactNumber(m.total_tokens)}</b> (Cache <b>${Number(m.cache_hit_rate_pct || 0)}%</b>)<br/>
+              Avg Context: <b>${formatCompactNumber(m.avg_prompt_tokens)}</b> · &gt;200K: <b>${Number(m.long_context_pct || 0)}%</b><br/>
               Spend: <b>${formatCurrency(m.estimated_cost_usd)}</b> · Saved: <b>${formatCurrency(m.cache_savings_usd)}</b>
             </div>
             <div style="margin-top:5px;font-size:10px;color:#3b82f6">Click bar to cross-filter by model</div>
@@ -155,9 +156,9 @@ export default function ModelsAndFleetView({
         formatter: (p) => {
           const d = p.data?.raw || {};
           return `
-            <div style="font-weight:700;margin-bottom:4px">${p.name}</div>
+            <div style="font-weight:700;margin-bottom:4px">${escapeHtml(p.name)}</div>
             <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5">
-              Turns: <b>${formatFullNumber(d.requests)}</b> (${p.percent}%)<br/>
+              Turns: <b>${formatFullNumber(d.requests)}</b> (${Number(p.percent || 0)}%)<br/>
               Reasoning Tokens: <b>${formatCompactNumber(d.thinking_tokens)}</b><br/>
               Total Spend: <b>${formatCurrency(d.estimated_cost_usd)}</b>
             </div>

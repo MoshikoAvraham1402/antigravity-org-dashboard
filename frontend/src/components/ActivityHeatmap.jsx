@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Clock } from 'lucide-react';
-import { formatCompactNumber, formatCurrency, formatFullNumber } from '../utils/formatters';
+import { escapeHtml, formatCompactNumber, formatCurrency, formatFullNumber } from '../utils/formatters';
 
 const DAYS_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const HOURS_LABELS = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, '0')}:00`);
@@ -71,11 +71,11 @@ export default function ActivityHeatmap({
           const d = p.data;
           if (!d) return '';
           return `
-            <div style="font-weight:700;margin-bottom:4px">${d.dayName} · ${d.hourLabel}</div>
+            <div style="font-weight:700;margin-bottom:4px">${escapeHtml(d.dayName)} · ${escapeHtml(d.hourLabel)}</div>
             <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5">
               Turns: <b>${formatFullNumber(d.raw.requests)}</b><br/>
               Tokens: <b>${formatCompactNumber(d.raw.total_tokens)}</b><br/>
-              Active Engineers: <b>${d.raw.active_users || 0}</b> · Est: <b>${formatCurrency(d.raw.estimated_cost_usd)}</b>
+              Active Engineers: <b>${Number(d.raw.active_users || 0)}</b> · Est: <b>${formatCurrency(d.raw.estimated_cost_usd)}</b>
             </div>
           `;
         },

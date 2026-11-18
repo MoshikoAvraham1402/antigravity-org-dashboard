@@ -103,7 +103,7 @@ def parse_local_db_turns(
     if not db_path.is_file():
         return []
 
-    uri = f"file:{db_path.as_posix()}?mode=ro"
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=5)
     except sqlite3.Error:

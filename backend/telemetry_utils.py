@@ -371,42 +371,56 @@ def parse_protobuf_fields(buf: bytes, max_depth: int = 3) -> list[tuple[int, str
     while i < n:
         tag = 0
         shift = 0
+        terminated = False
         while i < n:
             b = buf[i]
             i += 1
             tag |= (b & 0x7F) << shift
             if not (b & 0x80):
+                terminated = True
                 break
             shift += 7
             if shift > 35:
                 raise ValueError("varint overflow")
+        if not terminated:
+            raise ValueError("truncated varint tag")
         fn = tag >> 3
         wt = tag & 7
+        if fn <= 0:
+            raise ValueError("invalid field number")
         if wt == 0:
             val = 0
             s = 0
+            v_terminated = False
             while i < n:
                 b = buf[i]
                 i += 1
                 val |= (b & 0x7F) << s
                 if not (b & 0x80):
+                    v_terminated = True
                     break
                 s += 7
                 if s > 63:
                     raise ValueError("varint overflow")
+            if not v_terminated:
+                raise ValueError("truncated varint value")
             out.append((fn, "varint", val))
         elif wt == 2:
             ln = 0
             s = 0
+            l_terminated = False
             while i < n:
                 b = buf[i]
                 i += 1
                 ln |= (b & 0x7F) << s
                 if not (b & 0x80):
+                    l_terminated = True
                     break
                 s += 7
                 if s > 35:
                     raise ValueError("length overflow")
+            if not l_terminated:
+                raise ValueError("truncated length varint")
             if i + ln > n:
                 raise ValueError("truncated length-delimited field")
             sub = buf[i : i + ln]

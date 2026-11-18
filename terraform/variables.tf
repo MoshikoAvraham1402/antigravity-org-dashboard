@@ -103,3 +103,9 @@ variable "enable_vertex_telemetry" {
   type        = bool
   default     = true
 }
+
+variable "auth_token_secret_name" {
+  description = "Optional GCP Secret Manager secret ID storing DASHBOARD_AUTH_TOKEN to require a password/token on public deployments."
+  type        = string
+  default     = ""
+}

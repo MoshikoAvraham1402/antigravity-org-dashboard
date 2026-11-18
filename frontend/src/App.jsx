@@ -30,12 +30,32 @@ import DeveloperTable from './components/DeveloperTable';
 import DeveloperDrawer from './components/DeveloperDrawer';
 import SinkSetupModal from './components/SinkSetupModal';
 import EmptyOnboardingBanner from './components/EmptyOnboardingBanner';
+import AuthLockScreen from './components/AuthLockScreen';
 import { formatReadableDate, formatTimestamp, formatClockTime } from './utils/formatters';
+
+const TOKEN_STORAGE_KEY = 'ag_dashboard_token';
+
+function readStoredToken() {
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
 
 const apiClient = axios.create({
   headers: {
     'X-Requested-With': 'AntigravityDashboard',
   },
+});
+
+apiClient.interceptors.request.use((config) => {
+  const tok = readStoredToken();
+  if (tok) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${tok}`;
+  }
+  return config;
 });
 
 const DATE_RANGES = [
@@ -83,6 +103,8 @@ export default function App() {
   const [drilldownLoading, setDrilldownLoading] = useState(false);
 
   const [sinkModalOpen, setSinkModalOpen] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authError, setAuthError] = useState(null);
   const toastTimerRef = useRef(null);
 
   useEffect(() => {
@@ -121,12 +143,23 @@ export default function App() {
         },
       });
       setData(res.data);
+      setAuthRequired(false);
+      setAuthError(null);
       setLastSyncedAt(res.data?.meta?.generated_at || new Date().toISOString());
     } catch (err) {
       const status = err?.response?.status;
-      if (status === 429) {
+      if (status === 401) {
+        const hadToken = Boolean(readStoredToken());
+        try {
+          sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        setAuthRequired(true);
+        setAuthError(hadToken ? 'Invalid password or access token.' : null);
+      } else if (status === 429) {
         setError('Rate limit reached. Please wait a few seconds before retrying.');
-      } else if (status === 401 || status === 403) {
+      } else if (status === 403) {
         setError('Access denied. Please verify your session or security headers.');
       } else {
         const detail = err?.response?.data?.detail || 'Failed to load dashboard telemetry.';
@@ -136,6 +169,30 @@ export default function App() {
       setLoading(false);
     }
   }, [days, project, surface, model, provider, quota, effort]);
+
+  const handleUnlockToken = useCallback(
+    (tokenVal) => {
+      try {
+        sessionStorage.setItem(TOKEN_STORAGE_KEY, tokenVal);
+      } catch {
+        // ignore
+      }
+      setAuthError(null);
+      fetchDashboard();
+    },
+    [fetchDashboard]
+  );
+
+  const handleLockDashboard = useCallback(() => {
+    try {
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    setData(null);
+    setAuthRequired(true);
+    setAuthError(null);
+  }, []);
 
   useEffect(() => {
     fetchDashboard();
@@ -301,6 +358,16 @@ export default function App() {
     }
     return chips;
   }, [project, surface, model, provider, quota, effort, meta]);
+
+  if (authRequired) {
+    return (
+      <AuthLockScreen
+        onSubmitToken={handleUnlockToken}
+        error={authError}
+        loading={loading}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#fafafa] dark:bg-[#09090b] text-zinc-950 dark:text-zinc-50 transition-colors duration-200">
@@ -477,6 +544,18 @@ export default function App() {
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-zinc-700" />}
             </button>
+
+            {meta?.token_auth_enabled && (
+              <button
+                type="button"
+                title="Lock dashboard & clear session token"
+                onClick={handleLockDashboard}
+                className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-[8px] bg-white dark:bg-[#0c0c0f] hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-300 text-xs font-semibold transition-colors shadow-sm"
+              >
+                <Lock className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Lock</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -715,7 +794,12 @@ export default function App() {
           <div className="flex items-center gap-1.5">
             <Shield className="w-3.5 h-3.5 text-emerald-500" />
             <span>
-              {meta?.viewer_email ? 'Zero-Trust IAP Runtime' : 'Hardened Cloud Run Runtime'} · Least-Privilege SA · 150MB Scan Cap · Prompt &amp; code payloads excluded.
+              {meta?.viewer_email
+                ? 'Zero-Trust IAP Runtime'
+                : meta?.token_auth_enabled
+                ? 'Password-Protected Runtime'
+                : 'Hardened Cloud Run Runtime'}{' '}
+              · Least-Privilege SA · 150MB Scan Cap · Prompt &amp; code payloads excluded.
             </span>
           </div>
           <button

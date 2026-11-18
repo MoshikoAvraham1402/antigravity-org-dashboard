@@ -90,6 +90,15 @@ export function formatTimestamp(isoString) {
   }
 }
 
+export function escapeHtml(val) {
+  return String(val ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function formatClockTime(isoString) {
   if (!isoString) return '—';
   try {

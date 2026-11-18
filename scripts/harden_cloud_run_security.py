@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,10 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from backend.telemetry_utils import get_gcp_credentials  # noqa: E402
+
+
+_SAFE_GCP_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+_SAFE_FQN_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 
 
 def get_headers() -> dict[str, str]:
@@ -277,11 +282,18 @@ def main() -> None:
     if not project_id:
         _, detected = get_gcp_credentials()
         project_id = detected or ""
-    if not project_id:
-        raise SystemExit("Error: --project or GCP_PROJECT_ID is required.")
+    if not project_id or not _SAFE_GCP_ID_RE.match(project_id):
+        raise SystemExit("Error: valid --project or GCP_PROJECT_ID is required.")
+    if not _SAFE_GCP_ID_RE.match(args.raw_dataset) or not _SAFE_GCP_ID_RE.match(args.monitoring_dataset):
+        raise SystemExit("Error: invalid BigQuery dataset identifier.")
+    if not _SAFE_GCP_ID_RE.match(args.service) or not _SAFE_GCP_ID_RE.match(args.region) or not _SAFE_GCP_ID_RE.match(args.sa_id):
+        raise SystemExit("Error: invalid Cloud Run service, region, or service account identifier.")
+    clean_billing = args.billing_table.strip().strip("`")
+    if clean_billing and not _SAFE_FQN_RE.match(clean_billing):
+        raise SystemExit("Error: --billing-table must match project.dataset.table.")
 
     sa_email = f"{args.sa_id}@{project_id}.iam.gserviceaccount.com"
-    scan_list = [p.strip() for p in args.scan_projects.split(",") if p.strip()]
+    scan_list = [p.strip() for p in args.scan_projects.split(",") if p.strip() and _SAFE_GCP_ID_RE.match(p.strip())]
     hdrs = get_headers()
     ensure_least_privilege_sa(
         hdrs,
@@ -297,7 +309,7 @@ def main() -> None:
         sa_email,
         args.raw_dataset,
         args.monitoring_dataset,
-        args.billing_table.strip(),
+        clean_billing,
     )
     hdrs = get_headers()
     patch_cloud_run_service(

@@ -243,6 +243,14 @@ resource "google_organization_iam_member" "org_browser" {
   member = "serviceAccount:${google_service_account.dashboard_runtime.email}"
 }
 
+resource "google_secret_manager_secret_iam_member" "auth_token_accessor" {
+  count     = var.auth_token_secret_name != "" ? 1 : 0
+  project   = var.project_id
+  secret_id = var.auth_token_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+}
+
 # ==============================================================================
 # 4. Hardened Cloud Run v2 Service
 # ==============================================================================
@@ -323,6 +331,19 @@ resource "google_cloud_run_v2_service" "dashboard" {
       env {
         name  = "ENABLE_VERTEX_TELEMETRY"
         value = var.enable_vertex_telemetry ? "true" : "false"
+      }
+
+      dynamic "env" {
+        for_each = var.auth_token_secret_name != "" ? [1] : []
+        content {
+          name = "DASHBOARD_AUTH_TOKEN"
+          value_source {
+            secret_key_ref {
+              secret  = var.auth_token_secret_name
+              version = "latest"
+            }
+          }
+        }
       }
     }
   }

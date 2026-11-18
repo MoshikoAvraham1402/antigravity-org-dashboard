@@ -49,15 +49,18 @@ Choose **Option A** (Zero-Trust Identity-Aware Proxy — recommended for interna
   --access iap
 ```
 
-### Option B: Public URL Mode
+### Option B: Public URL (With Optional Password Protection)
 
 ```bash
+# Prompts interactively to set or auto-generate DASHBOARD_AUTH_TOKEN when no Org IAP exists,
+# or pass --generate-token to auto-generate and store it in Secret Manager:
 ./install.sh \
   --project "${PROJECT_ID}" \
   --org "${ORG_ID}" \
   --region us-central1 \
   --bq-location US \
-  --access public
+  --access public \
+  --generate-token
 ```
 
 ### Optional: Link Cloud Billing Standard Export

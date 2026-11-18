@@ -4,6 +4,7 @@ import { Filter } from 'lucide-react';
 import ActivityHeatmap from './ActivityHeatmap';
 import MetricTooltip from './MetricTooltip';
 import {
+  escapeHtml,
   formatCompactNumber,
   formatCurrency,
   formatFullNumber,
@@ -54,10 +55,10 @@ export default function ChartsSection({
           const idx = params[0].dataIndex;
           const pt = dailySeries[idx] || {};
           return `
-            <div style="font-weight:700;margin-bottom:6px">${formatReadableDate(pt.date)}</div>
+            <div style="font-weight:700;margin-bottom:6px">${escapeHtml(formatReadableDate(pt.date))}</div>
             <div style="display:flex;flex-direction:column;gap:3px;font-family:'JetBrains Mono',monospace;font-size:11px">
-              <span><span style="color:#3b82f6">●</span> DAU: <b>${pt.dau ?? 0}</b> · 7d WAU: <b>${pt.wau_7d ?? 0}</b> (${pt.stickiness_pct ?? 0}%)</span>
-              <span><span style="color:#8b5cf6">●</span> Agent Turns: <b>${formatFullNumber(pt.requests)}</b> (${pt.sessions ?? 0} trajectories)</span>
+              <span><span style="color:#3b82f6">●</span> DAU: <b>${Number(pt.dau || 0)}</b> · 7d WAU: <b>${Number(pt.wau_7d || 0)}</b> (${Number(pt.stickiness_pct || 0)}%)</span>
+              <span><span style="color:#8b5cf6">●</span> Agent Turns: <b>${formatFullNumber(pt.requests)}</b> (${Number(pt.sessions || 0)} trajectories)</span>
               <span><span style="color:#10b981">●</span> Tool Calls: <b>${formatFullNumber(pt.tool_calls)}</b> · Est: <b>${formatCurrency(pt.estimated_cost_usd)}</b></span>
             </div>
           `;
@@ -160,11 +161,11 @@ export default function ChartsSection({
             if (!params?.length) return '';
             const pt = dailySeries[params[0].dataIndex] || {};
             return `
-              <div style="font-weight:700;margin-bottom:5px">${formatReadableDate(pt.date)}</div>
+              <div style="font-weight:700;margin-bottom:5px">${escapeHtml(formatReadableDate(pt.date))}</div>
               <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6">
                 <span style="color:#f43f5e">●</span> Actual Token Spend: <b>${formatCurrency(pt.estimated_cost_usd)}</b><br/>
                 <span style="color:#10b981">●</span> Avoided via Prompt Cache: <b>${formatCurrency(pt.cache_savings_usd)}</b><br/>
-                Cache Hit Rate: <b>${pt.cache_hit_rate_pct ?? 0}%</b>
+                Cache Hit Rate: <b>${Number(pt.cache_hit_rate_pct || 0)}%</b>
               </div>
             `;
           },
@@ -229,7 +230,7 @@ export default function ChartsSection({
             const tot = Math.max(1, Number(pt.requests || 0));
             const ovPct = Math.round((Number(pt.overage_requests || 0) / tot) * 100);
             return `
-              <div style="font-weight:700;margin-bottom:5px">${formatReadableDate(pt.date)}</div>
+              <div style="font-weight:700;margin-bottom:5px">${escapeHtml(formatReadableDate(pt.date))}</div>
               <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6">
                 <span style="color:#10b981">●</span> Included Subscription Turns: <b>${formatFullNumber(pt.regular_requests)}</b><br/>
                 <span style="color:#f59e0b">●</span> Overage Pay-As-You-Go Turns: <b>${formatFullNumber(pt.overage_requests)}</b> (${ovPct}%)<br/>
@@ -304,16 +305,16 @@ export default function ChartsSection({
             .map(
               (s) =>
                 `<div style="display:flex;justify-content:space-between;gap:16px">
-                  <span>${s.marker} ${s.seriesName}</span>
+                  <span>${s.marker} ${escapeHtml(s.seriesName)}</span>
                   <span style="font-family:'JetBrains Mono',monospace;font-weight:600">${formatCompactNumber(s.value)}</span>
                 </div>`
             )
             .join('');
           return `
-            <div style="font-weight:700;margin-bottom:6px">${formatReadableDate(pt.date)}</div>
+            <div style="font-weight:700;margin-bottom:6px">${escapeHtml(formatReadableDate(pt.date))}</div>
             ${lines}
             <div style="margin-top:6px;padding-top:6px;border-top:1px solid ${themeTokens.tooltipBorder};font-family:'JetBrains Mono',monospace;font-size:11px">
-              Total: <b>${formatCompactNumber(pt.total_tokens)}</b> · Cache Hit: <b>${pt.cache_hit_rate_pct}%</b>
+              Total: <b>${formatCompactNumber(pt.total_tokens)}</b> · Cache Hit: <b>${Number(pt.cache_hit_rate_pct || 0)}%</b>
             </div>
           `;
         },

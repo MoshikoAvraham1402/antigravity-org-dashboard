@@ -3,7 +3,7 @@
  */
 export function sanitizeCsvCell(val) {
   let str = String(val ?? '');
-  if (/^[=+\-@\t\r]/.test(str)) {
+  if (/^[\t\r]|^\s*[=+\-@]/.test(str)) {
     str = `'${str}`;
   }
   return `"${str.replace(/"/g, '""')}"`;

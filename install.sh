@@ -8,7 +8,7 @@
 #   3. Configures the Organization / Folder / Project Cloud Logging -> BigQuery Sink
 #   4. Backfills historical Antigravity + optional Vertex AI metadata (last 30 days)
 #   5. Builds & deploys the hardened FastAPI + React container to Cloud Run
-#   6. Provisions least-privilege runtime Service Account, dataset IAM & IAP/Public ingress
+#   6. Provisions least-privilege runtime Service Account, dataset IAM & IAP/Public/Token ingress
 #
 # Usage:
 #   ./install.sh --project YOUR_PROJECT_ID [options]
@@ -32,7 +32,10 @@ MONITORING_DATASET="${MONITORING_DATASET:-antigravity_monitoring}"
 RAW_LOGS_DATASET="${RAW_LOGS_DATASET:-antigravity_raw_logs}"
 SINK_NAME="${LOGGING_SINK_NAME:-antigravity-org-bq-sink}"
 SCAN_PROJECTS="${ORG_PROJECTS:-}"
-ACCESS_MODE="${ACCESS_MODE:-iap}"
+ACCESS_MODE=""
+AUTH_TOKEN="${DASHBOARD_AUTH_TOKEN:-}"
+GENERATE_TOKEN="false"
+NO_AUTH_PROMPT="false"
 BACKFILL_DAYS=30
 ENABLE_VERTEX_TELEMETRY="${ENABLE_VERTEX_TELEMETRY:-true}"
 SYNC_LOCAL="false"
@@ -56,7 +59,10 @@ Core Options:
   --timezone <TZ>           IANA timezone for 7x24 activity heatmap, e.g. America/New_York (default: UTC)
   --billing-table <FQN>     Optional BigQuery Cloud Billing export table (project.dataset.table)
   --scan-projects <CSV>     Optional comma-separated GCP project IDs to scan during backfill & live sync
-  --access <iap|public>     Ingress security mode: 'iap' (Zero-Trust IAP, default) or 'public'
+  --access <iap|public>     Ingress security mode ('iap' or 'public'; interactive prompt if omitted on TTY)
+  --auth-token <TOKEN>      Optional password/token (DASHBOARD_AUTH_TOKEN) to protect a public dashboard
+  --generate-token          Auto-generate a random DASHBOARD_AUTH_TOKEN and store it in Secret Manager
+  --no-auth-prompt          Skip interactive access security prompt
   --service <NAME>          Cloud Run service name (default: antigravity-usage-dashboard)
   --backfill-days <DAYS>    Days of historical metadata to backfill (default: 30)
   --no-vertex-telemetry     Disable Vertex AI / Gemini API Cloud Monitoring collector
@@ -79,6 +85,9 @@ while [[ $# -gt 0 ]]; do
     --billing-table) BILLING_TABLE="$2"; shift 2 ;;
     --scan-projects) SCAN_PROJECTS="$2"; shift 2 ;;
     --access) ACCESS_MODE="$2"; shift 2 ;;
+    --auth-token) AUTH_TOKEN="$2"; shift 2 ;;
+    --generate-token) GENERATE_TOKEN="true"; shift ;;
+    --no-auth-prompt) NO_AUTH_PROMPT="true"; shift ;;
     --service) SERVICE_NAME="$2"; shift 2 ;;
     --backfill-days) BACKFILL_DAYS="$2"; shift 2 ;;
     --no-vertex-telemetry) ENABLE_VERTEX_TELEMETRY="false"; shift ;;
@@ -103,7 +112,7 @@ if [[ -z "${PYTHON_SYS}" ]]; then
   exit 1
 fi
 
-if [[ "${ACCESS_MODE}" != "iap" && "${ACCESS_MODE}" != "public" ]]; then
+if [[ -n "${ACCESS_MODE}" && "${ACCESS_MODE}" != "iap" && "${ACCESS_MODE}" != "public" ]]; then
   echo "Error: --access must be either 'iap' or 'public' (got '${ACCESS_MODE}')." >&2
   exit 1
 fi
@@ -131,7 +140,6 @@ echo "==========================================================================
 echo "  Host GCP Project : ${PROJECT_ID}"
 echo "  Cloud Run Region : ${REGION}"
 echo "  BigQuery Location: ${BQ_LOCATION}"
-echo "  Access Mode      : ${ACCESS_MODE}"
 echo "=============================================================================="
 
 echo ""
@@ -158,13 +166,95 @@ if [[ -z "${ORG_ID}" && -z "${FOLDER_ID}" ]]; then
   fi
 fi
 
-# Only auto-populate ORG_DOMAIN when displayName is a valid DNS domain (avoids locking out IAP when displayName is e.g. 'Acme Inc')
 if [[ -z "${ORG_DOMAIN}" && -n "${ORG_ID}" ]]; then
   CANDIDATE_DOMAIN="$(gcloud organizations describe "${ORG_ID}" --format='value(displayName)' 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
   if [[ "${CANDIDATE_DOMAIN}" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
     ORG_DOMAIN="${CANDIDATE_DOMAIN}"
     echo "    Auto-detected Organization Domain: ${ORG_DOMAIN}"
   fi
+fi
+
+GENERATED_TOKEN="false"
+if [[ "${GENERATE_TOKEN}" == "true" && -z "${AUTH_TOKEN}" ]]; then
+  AUTH_TOKEN="$("${PYTHON_SYS}" -c "import secrets; print(secrets.token_urlsafe(24))")"
+  GENERATED_TOKEN="true"
+  ACCESS_MODE="${ACCESS_MODE:-public}"
+elif [[ -n "${AUTH_TOKEN}" ]]; then
+  ACCESS_MODE="${ACCESS_MODE:-public}"
+elif [[ "${ACCESS_MODE}" != "iap" && -t 0 && "${NO_AUTH_PROMPT}" != "true" ]]; then
+  echo ""
+  echo "------------------------------------------------------------------------------"
+  if [[ "${ACCESS_MODE}" == "public" ]]; then
+    if [[ -n "${ORG_ID}" ]]; then
+      echo "  Dashboard Access Security (Public URL Selected · Org: ${ORG_ID})"
+    else
+      echo "  Dashboard Access Security (No GCP Organization detected)"
+    fi
+    echo "------------------------------------------------------------------------------"
+    echo "  Notice: The service is configured for public mode (without built-in IAP)."
+    if [[ -z "${ORG_ID}" ]]; then
+      echo "  Because this project has no GCP Organization, Workspace IAP is unavailable."
+    fi
+    echo "  To protect your telemetry data, you can set DASHBOARD_AUTH_TOKEN on Cloud Run"
+    echo "  (stored securely in Secret Manager) or enable IAP under a Workspace Org."
+    echo ""
+    echo "  [1] Protect with a password / token (Recommended — sets DASHBOARD_AUTH_TOKEN)"
+    echo "  [2] Continue with open public access (no password)"
+    read -r -p "  Select access protection [1/2, default 1]: " CHOICE
+    CHOICE="${CHOICE:-1}"
+    if [[ "${CHOICE}" != "2" ]]; then
+      WANT_TOKEN="true"
+    fi
+  elif [[ -n "${ORG_ID}" ]]; then
+    echo "  Dashboard Access Security (GCP Organization: ${ORG_ID})"
+    echo "------------------------------------------------------------------------------"
+    echo "  [1] Zero-Trust IAP (Recommended for Enterprise / Workspace)"
+    echo "  [2] Password / Token-protected Public URL (DASHBOARD_AUTH_TOKEN)"
+    echo "  [3] Public unauthenticated URL (no password — open access)"
+    read -r -p "  Select access mode [1/2/3, default 1]: " CHOICE
+    CHOICE="${CHOICE:-1}"
+    case "${CHOICE}" in
+      1) ACCESS_MODE="iap" ;;
+      3) ACCESS_MODE="public" ;;
+      *) ACCESS_MODE="public"; WANT_TOKEN="true" ;;
+    esac
+  else
+    echo "  Dashboard Access Security (No GCP Organization detected)"
+    echo "------------------------------------------------------------------------------"
+    echo "  Notice: Currently the service deploys in public mode (because this project"
+    echo "  has no GCP Organization for built-in Workspace IAP). To protect access to"
+    echo "  your telemetry data, you can set a password/token (DASHBOARD_AUTH_TOKEN in"
+    echo "  Cloud Run / Secret Manager) or host under a Workspace Organization for IAP."
+    echo ""
+    echo "  [1] Password / Token-protected URL (Recommended — sets DASHBOARD_AUTH_TOKEN)"
+    echo "  [2] Public unauthenticated URL (open access, no password)"
+    echo "  [3] Zero-Trust IAP (only if your project has an IAP OAuth brand)"
+    read -r -p "  Select access mode [1/2/3, default 1]: " CHOICE
+    CHOICE="${CHOICE:-1}"
+    case "${CHOICE}" in
+      2) ACCESS_MODE="public" ;;
+      3) ACCESS_MODE="iap" ;;
+      *) ACCESS_MODE="public"; WANT_TOKEN="true" ;;
+    esac
+  fi
+
+  if [[ "${WANT_TOKEN:-false}" == "true" ]]; then
+    read -r -s -p "  Enter dashboard password/token (min 8 chars recommended, press Enter to auto-generate): " INPUT_TOK
+    echo ""
+    if [[ -n "${INPUT_TOK}" ]]; then
+      if [[ "${#INPUT_TOK}" -lt 8 ]]; then
+        echo "    [Note] Password is shorter than 8 chars; a 12+ character passphrase is recommended."
+      fi
+      AUTH_TOKEN="${INPUT_TOK}"
+    else
+      AUTH_TOKEN="$("${PYTHON_SYS}" -c "import secrets; print(secrets.token_urlsafe(24))")"
+      GENERATED_TOKEN="true"
+    fi
+  fi
+fi
+
+if [[ -z "${ACCESS_MODE}" ]]; then
+  ACCESS_MODE="$([[ -n "${ORG_ID}" ]] && echo "iap" || echo "public")"
 fi
 
 echo ""
@@ -241,12 +331,66 @@ fi
 
 echo ""
 echo "==> [Step 6/6] Building & deploying hardened Cloud Run service (${SERVICE_NAME})..."
+SA_EMAIL="antigravity-dashboard-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" >/dev/null 2>&1 || \
+  gcloud iam service-accounts create antigravity-dashboard-sa \
+    --display-name="Antigravity Dashboard Least-Privilege Runtime SA" \
+    --project="${PROJECT_ID}" >/dev/null 2>&1 || true
+
 REQUIRE_IAP="true"
 if [[ "${ACCESS_MODE}" == "public" ]]; then
   REQUIRE_IAP="false"
 fi
 
-ENV_VARS="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_PROJECT_NUMBER=${PROJECT_NUMBER}|GCP_REGION=${REGION}|GCP_ORG_ID=${ORG_ID}|GCP_ORG_DOMAIN=${ORG_DOMAIN}|ORG_TIMEZONE=${ORG_TIMEZONE}|MONITORING_DATASET=${MONITORING_DATASET}|RAW_LOGS_DATASET=${RAW_LOGS_DATASET}|LOGGING_SINK_NAME=${SINK_NAME}|ORG_PROJECTS=${SCAN_PROJECTS}|BILLING_EXPORT_TABLE=${BILLING_TABLE}|REQUIRE_IAP_AUTH=${REQUIRE_IAP}|ENABLE_VERTEX_TELEMETRY=${ENABLE_VERTEX_TELEMETRY}"
+SECRET_FLAGS=(--clear-secrets)
+AUTH_SECRET_NAME="antigravity-dashboard-auth-token"
+FALLBACK_ENV_TOKEN=""
+if [[ -n "${AUTH_TOKEN}" ]]; then
+  if gcloud services enable secretmanager.googleapis.com --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud secrets describe "${AUTH_SECRET_NAME}" --project="${PROJECT_ID}" >/dev/null 2>&1 || \
+      gcloud secrets create "${AUTH_SECRET_NAME}" --replication-policy=automatic --labels=datacloud=antigravity --project="${PROJECT_ID}" >/dev/null
+    printf '%s' "${AUTH_TOKEN}" | gcloud secrets versions add "${AUTH_SECRET_NAME}" --data-file=- --project="${PROJECT_ID}" >/dev/null
+    gcloud secrets add-iam-policy-binding "${AUTH_SECRET_NAME}" --project="${PROJECT_ID}" \
+      --member="serviceAccount:${SA_EMAIL}" --role="roles/secretmanager.secretAccessor" --condition=None >/dev/null
+    SECRET_FLAGS=("--set-secrets=DASHBOARD_AUTH_TOKEN=${AUTH_SECRET_NAME}:latest")
+    echo "    Stored DASHBOARD_AUTH_TOKEN in Secret Manager (${AUTH_SECRET_NAME})."
+  else
+    FALLBACK_ENV_TOKEN="${AUTH_TOKEN}"
+  fi
+fi
+
+ENV_FILE="$(mktemp)"
+"${PYTHON_SYS}" - "${ENV_FILE}" \
+  "${PROJECT_ID}" "${PROJECT_NUMBER}" "${REGION}" "${ORG_ID}" "${ORG_DOMAIN}" "${ORG_TIMEZONE}" \
+  "${MONITORING_DATASET}" "${RAW_LOGS_DATASET}" "${SINK_NAME}" "${SCAN_PROJECTS}" "${BILLING_TABLE}" \
+  "${REQUIRE_IAP}" "${ENABLE_VERTEX_TELEMETRY}" "${FALLBACK_ENV_TOKEN}" <<'PYEOF'
+import json
+import sys
+
+out_path = sys.argv[1]
+keys = [
+    "GCP_PROJECT_ID",
+    "GCP_PROJECT_NUMBER",
+    "GCP_REGION",
+    "GCP_ORG_ID",
+    "GCP_ORG_DOMAIN",
+    "ORG_TIMEZONE",
+    "MONITORING_DATASET",
+    "RAW_LOGS_DATASET",
+    "LOGGING_SINK_NAME",
+    "ORG_PROJECTS",
+    "BILLING_EXPORT_TABLE",
+    "REQUIRE_IAP_AUTH",
+    "ENABLE_VERTEX_TELEMETRY",
+]
+env_map = dict(zip(keys, sys.argv[2:15]))
+if len(sys.argv) > 15 and sys.argv[15]:
+    env_map["DASHBOARD_AUTH_TOKEN"] = sys.argv[15]
+with open(out_path, "w", encoding="utf-8") as fh:
+    for k, v in env_map.items():
+        fh.write(f"{k}: {json.dumps(v)}\n")
+PYEOF
+trap 'rm -f "${ENV_FILE}"' EXIT
 
 AUTH_FLAG="--no-allow-unauthenticated"
 if [[ "${ACCESS_MODE}" == "public" ]]; then
@@ -257,13 +401,15 @@ gcloud run deploy "${SERVICE_NAME}" \
   --source "${ROOT_DIR}" \
   --project "${PROJECT_ID}" \
   --region "${REGION}" \
+  --service-account="${SA_EMAIL}" \
   --memory 512Mi \
   --cpu 1 \
   --max-instances 5 \
   --concurrency 40 \
   --port 8080 \
   ${AUTH_FLAG} \
-  --set-env-vars "${ENV_VARS}" \
+  --env-vars-file="${ENV_FILE}" \
+  "${SECRET_FLAGS[@]}" \
   --labels "datacloud=antigravity,app=antigravity-dashboard" \
   --quiet
 
@@ -290,6 +436,15 @@ echo ""
 echo "=============================================================================="
 echo "  Deployment Complete!"
 echo "  Dashboard URL : ${SERVICE_URL}"
-echo "  Runtime SA    : antigravity-dashboard-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+echo "  Runtime SA    : ${SA_EMAIL}"
 echo "  Access Mode   : ${ACCESS_MODE}"
+if [[ -n "${AUTH_TOKEN}" ]]; then
+  echo "  Auth Token    : ENABLED (Secret Manager: ${AUTH_SECRET_NAME})"
+  if [[ "${GENERATED_TOKEN}" == "true" ]]; then
+    echo "  Generated Key : ${AUTH_TOKEN}"
+  fi
+elif [[ "${ACCESS_MODE}" == "public" ]]; then
+  echo "  Note: Dashboard URL is currently public without a password."
+  echo "  Re-run with --generate-token (or set DASHBOARD_AUTH_TOKEN) to add password protection."
+fi
 echo "=============================================================================="

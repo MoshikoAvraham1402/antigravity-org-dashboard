@@ -7,9 +7,9 @@
 
 [![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2FMoshikoAvraham1402%2Fantigravity-org-dashboard.git&cloudshell_tutorial=docs%2Fcloudshell_tutorial.md)
 
-An enterprise-grade, turnkey observability and FinOps web application for monitoring **Google Antigravity** (`businessaicode.googleapis.com`) adoption, active engineers, agentic trajectory depth, token economics, prompt cache ROI, and actual Cloud Billing invoices across an entire **Google Cloud Organization**.
+An enterprise-grade, turnkey observability and FinOps web application for monitoring **Google Antigravity** (`businessaicode.googleapis.com`), **Vertex AI** (`aiplatform.googleapis.com`), and **Google AI Studio / Gemini API** (`generativelanguage.googleapis.com`) adoption, token economics, prompt cache ROI, and actual Cloud Billing invoices across a **Google Cloud Organization** or standalone GCP projects.
 
-Deployable into **your own Google Cloud environment** in under 5 minutes via **1-Click Google Cloud Shell**, a single CLI command (`./install.sh`), or **Terraform** — ensuring 100% data sovereignty inside your tenant.
+Deployable into **your own Google Cloud environment** in under 5 minutes via **1-Click Google Cloud Shell**, cross-platform CLI installers (`scripts/install.py` / `./install.sh`), or **Terraform** — ensuring 100% data sovereignty inside your tenant.
 
 ![Executive Overview Preview](docs/images/preview-overview.png)
 
@@ -20,10 +20,20 @@ Deployable into **your own Google Cloud environment** in under 5 minutes via **1
 When rolling out Google Antigravity across engineering teams, platform and FinOps leaders need visibility across multiple GCP projects without exposing sensitive developer source code or prompt contents:
 
 - **Adoption & Stickiness:** Who is actively using Antigravity (`DAU / WAU / MAU`), how sticky is daily usage (`DAU/MAU %`), and when does peak engineering velocity happen (`7x24 Timezone Heatmap`)?
-- **Model & Effort Economics:** Which models (`Gemini 3.1 Pro`, `Gemini 3 Flash`, `Claude Opus`, `Claude Sonnet`, etc.) and effort modes (`High / Thinking`, `Medium`, `Lite`) drive token consumption and thinking-token overhead?
+- **Model & Effort Economics:** Which models (`Gemini 4 Hydrogen/Argon/Carbon`, `Gemini 3.8 Flash/Live`, `Nano Banana 2.1`, `Claude Opus/Sonnet`, etc.) and effort modes (`Max`, `High`, `Medium`, `Lite`) drive token consumption, `>200K` long-context tiers, and thinking-token overhead?
+- **Vertex AI & Google AI Studio / Gemini API Coverage:** Automatically tracks **Vertex AI** per-model token & invocation consumption and **Google AI Studio / Gemini Developer API** (`generativelanguage.googleapis.com`) `2xx` inference RPC traffic (`GenerateContent`, `StreamGenerateContent`, `BidiGenerateContent`, `EmbedContent`, `Predict`) across all accessible GCP projects — and reconciles **actual AI Studio, Gemini API & Vertex AI dollar spend, credits, and SKUs** when Cloud Billing Export is linked.
 - **Prompt Cache ROI:** What percentage of prompt context is served from cache, and how much spend is saved (`Cache Hit %` & `USD Saved`)?
 - **FinOps & Invoice Reconciliation:** How do token-based cost estimates compare against **actual Google Cloud Billing SKUs**, negotiated enterprise discounts, and `OVERAGE_QUOTA` vs. `REGULAR_QUOTA` consumption?
-- **IDE Fleet Hygiene & Trajectory Depth:** Which Antigravity IDE versions are deployed across workstations, how deep are multi-step agentic coding sessions (`P50 / P90 / Peak Turns`), and how many autonomous tool calls execute per turn?
+- **IDE Fleet Hygiene & Trajectory Depth:** Which Antigravity IDE versions are deployed across workstations (sorted numerically by SemVer), how deep are multi-step agentic coding sessions (`P50 / P90 / Peak Turns`), and how many autonomous tool calls execute per turn?
+
+### Supported Telemetry & AI Cost Sources
+
+| Source | Collection Mechanism | Captured Telemetry & FinOps Visibility |
+| :--- | :--- | :--- |
+| **Enterprise Antigravity** (`businessaicode.googleapis.com`) | Aggregated Org / Folder / Project Cloud Logging Sink + live `Sync Data` (`nextPageToken` paginated) | Turn-level tokens (`prompt`, `cached`, `output`, `thinking`), `>200K` 2x long-context pricing, effort tier, `toolCallsCount`, `trajectory_id`, IDE version, and principal email. |
+| **Vertex AI** (`aiplatform.googleapis.com`) | Cloud Monitoring (`online_serving/token_count` & `model_invocation_count`) via `backend/vertex_sync.py` | Hourly per-project, per-model token breakdown (input, cached, output, reasoning), invocation volume, and catalog-based USD cost estimation. |
+| **Google AI Studio / Gemini API** (`generativelanguage.googleapis.com`) | Cloud Monitoring (`serviceruntime.googleapis.com/api/request_count` filtered to `2xx` inference RPCs) + **Cloud Billing Export** (`BILLING_EXPORT_TABLE`) | Hourly inference request counts per RPC method (`GenerateContent`, `StreamGenerateContent`, `BidiGenerateContent`, `EmbedContent`, `Predict`) across GCP projects. Link `BILLING_EXPORT_TABLE` to track **actual AI Studio / Generative Language API & Vertex AI invoice spend, credits, and SKU rows** in **FinOps & Cloud Billing**. *(Note: GCP `serviceruntime` metrics expose request volume for AI Studio rather than per-token counts; exact AI Studio dollar costs come from Cloud Billing Export.)* |
+| **Local Workstation Antigravity** (`~/.gemini/antigravity*`) | Privacy-first CLI (`scripts/sync_local_antigravity.py`) | Metadata-only protobuf scan of local IDE/CLI SQLite DBs (token counts, model IDs, effort levels, tool counts, timestamps). **Never reads prompts, completions, or `step_payload`.** |
 
 ---
 
@@ -31,11 +41,10 @@ When rolling out Google Antigravity across engineering teams, platform and FinOp
 
 ```mermaid
 flowchart LR
-  subgraph Org["Customer Google Cloud Organization"]
-    P1["GCP Project A<br/>Antigravity Telemetry"]
-    P2["GCP Project B<br/>Antigravity Telemetry"]
-    PN["GCP Project N<br/>Antigravity Telemetry"]
-    Sink["Aggregated Cloud Logging Sink<br/>includeChildren = true"]
+  subgraph Org["Customer Google Cloud Projects / Organization"]
+    P1["GCP Projects<br/>Antigravity · Vertex AI · AI Studio"]
+    Sink["Aggregated Cloud Logging Sink<br/>(businessaicode.googleapis.com)"]
+    Local["Optional: Local Workstation Sync<br/>(~/.gemini/antigravity* metadata)"]
   end
 
   subgraph Host["Dashboard Host GCP Project"]
@@ -43,18 +52,19 @@ flowchart LR
     BQMon[("BigQuery Curated Dataset<br/>Partitioned History +<br/>Model Pricing + Views")]
     Billing[("Optional: Cloud Billing<br/>Standard Export Table")]
     CR["Hardened Cloud Run Service<br/>FastAPI + React 19 + ECharts<br/>Non-root UID 10001 / Read-Only FS"]
-    IAP["Identity-Aware Proxy (IAP)<br/>or Public Ingress"]
+    Auth["Identity-Aware Proxy (IAP)<br/>or Secret-Backed Auth Lock"]
   end
 
   Users["Engineering & FinOps Leaders"]
 
-  P1 & P2 & PN --> Sink
+  P1 --> Sink
   Sink -->|"Streaming Export"| BQRaw
+  Local -->|"Metadata-Only Sync"| BQMon
   BQRaw -->|"Deduplicated Metadata Join"| BQMon
   BQMon -->|"Parameterized SQL (150MB Cap)"| CR
-  Billing -.->|"SKU & Credit Reconciliation"| CR
-  CR -->|"Live Sync Data Button"| P1 & P2 & PN
-  Users -->|"HTTPS"| IAP --> CR
+  Billing -.->|"AI Studio / Vertex / Seat SKUs"| CR
+  CR -->|"Live Sync Data (Logs + Monitoring)"| P1
+  Users -->|"HTTPS"| Auth --> CR
 ```
 
 ---
@@ -135,12 +145,14 @@ If you use Antigravity IDE/CLI with a personal Google account or run Vertex AI /
 # Preview local workstation metrics without writing anything:
 python scripts/sync_local_antigravity.py --dry-run --days 30
 
-# Deploy & connect both Vertex AI Monitoring and local Antigravity session metadata:
+# Deploy & connect both Vertex AI Monitoring and local Antigravity session metadata.
+# When no GCP Organization is present, the installer automatically warns about public mode
+# and offers to set or auto-generate a password/token (DASHBOARD_AUTH_TOKEN in Secret Manager):
 python scripts/install.py \
   --project YOUR_HOST_PROJECT_ID \
   --scan-projects YOUR_HOST_PROJECT_ID,YOUR_AI_PROJECT_ID \
   --sync-local \
-  --access public
+  --generate-token
 ```
 
 Want to link your **BigQuery Cloud Billing Export** table for invoice SKU reconciliation?
@@ -210,7 +222,7 @@ All backend settings in [`backend/main.py`](backend/main.py) are 100% environmen
 | `BILLING_EXPORT_TABLE` | No | `""` | Optional BigQuery Cloud Billing export FQN (`project.dataset.table`). When unset, FinOps SKU cards gracefully show setup instructions. |
 | `ORG_PROJECTS` | No | *(Auto-discovered)* | Optional comma-separated project IDs for `Sync Data`. When blank, active accessible projects are discovered dynamically via Cloud Resource Manager API. |
 | `REQUIRE_IAP_AUTH` | No | `false` | Set `true` behind Cloud Run IAP to enforce cryptographic ES256 JWT verification inside FastAPI. |
-| `DASHBOARD_AUTH_TOKEN` | No | `""` | Optional static Bearer token check on `/api/*` when deploying without IAP (`--access public`). |
+| `DASHBOARD_AUTH_TOKEN` | No | `""` | Optional password / bearer token guard (stored in GCP Secret Manager via `--generate-token` or `--auth-token`) when deploying without IAP. |
 | `ENABLE_VERTEX_TELEMETRY` | No | `true` | Also ingest Vertex AI & Gemini API Cloud Monitoring usage during `Sync Data` and backfill. |
 | `MAX_BYTES_BILLED` | No | `157286400` (`150 MB`) | Hard per-query BigQuery bytes-billed safety ceiling. |
 
@@ -238,10 +250,20 @@ Changes take effect immediately on the next dashboard refresh without redeployin
 
 ## Security & Privacy-by-Design
 
-1. **Zero Prompt or Source Code Exposure:** BigQuery views and the live `Sync Data` pipeline strictly extract token counts, model IDs, latency/session IDs, IDE versions, and user principals. Raw prompt text (`prompt`) and model code completions (`candidates`) are **never** queried, stored in curated tables, or returned by any API endpoint.
-2. **100% Parameterized BigQuery SQL:** Every user-supplied filter (`days`, `project_id`, `model_id`, `email`) is validated via strict allowlists/regexes and bound via `bigquery.ScalarQueryParameter` — zero string interpolation of user input.
-3. **Least-Privilege Runtime Identity:** Cloud Run executes as `antigravity-dashboard-sa` with dataset-scoped `READER` permissions (not broad project Editor roles) and runs inside a read-only container filesystem (`chmod a-w /app`) as unprivileged UID `10001:10001`.
-4. **Built-in Abuse & Cost Guardrails:** Per-IP token-bucket rate limiting (`60 req/min` read, `3 syncs / 5 min`), `150 MB` `maximum_bytes_billed` per BigQuery query, `maxInstances=5` Cloud Run scaling cap, and strict `Content-Security-Policy` / `HSTS` / `X-Frame-Options: DENY` headers.
+1. **Zero Prompt or Source Code Exposure:** BigQuery views, the live `Sync Data` pipeline, and `scripts/sync_local_antigravity.py` strictly extract token counts, model IDs, latency/session IDs, IDE versions, and user principals. Raw prompt text (`prompt`), `step_payload` blobs, and model code completions (`candidates`) are **never** queried, stored in curated tables, or returned by any API endpoint.
+2. **Flexible Zero-Trust Access (IAP or Secret Manager Password Lock):** Supports native **Cloud Run IAP** (`ES256` JWT cryptographic verification pinned strictly to the host project's `PROJECT_NUMBER` / `PROJECT_ID`) for Workspace Organizations, **plus** an interactive password/token mode (`DASHBOARD_AUTH_TOKEN`, stored in **GCP Secret Manager**) when deploying without a GCP Organization. During installation, `scripts/install.py` and `install.sh` automatically warn when no Organization exists for IAP and let you choose between setting a custom/auto-generated password or open public access.
+3. **100% Parameterized BigQuery SQL & Strict Validation:** Every user-supplied filter (`days`, `project_id`, `model_id`, `effort`, `email`) and environment identifier (`GCP_PROJECT_ID`, datasets, `ORG_PROJECTS`, `BILLING_EXPORT_TABLE`) is validated via strict allowlists/regexes and bound via `bigquery.ScalarQueryParameter` — zero string interpolation of user input.
+4. **Least-Privilege Runtime Identity:** Cloud Run executes as `antigravity-dashboard-sa` with dataset-scoped `READER` permissions (not broad project Editor roles), table-scoped `WRITER` strictly on `real_historical_inference_logs`, `secretAccessor` solely on `antigravity-dashboard-auth-token` when enabled, and runs inside a read-only container filesystem (`chmod a-w /app`) as unprivileged UID `10001:10001`.
+5. **Built-in Abuse, XSS & Cost Guardrails:** Constant-time `hmac.compare_digest` bearer verification with browser `AuthLockScreen` (`sessionStorage` + Lock button), pre-auth brute-force rate limiting (`10 failed attempts / 60s`), rightmost-GFE `X-Forwarded-For` client IP extraction on Cloud Run, per-IP token-bucket rate limits (`45 req/min` read, `3 syncs/min`), `150 MB` `maximum_bytes_billed` per BigQuery query, `maxInstances=5` Cloud Run scaling cap, HTML-escaped ECharts tooltips (`escapeHtml`), leading-whitespace CSV formula sanitization, and strict `Content-Security-Policy` / `HSTS` / `X-Frame-Options: DENY` / `Cache-Control: no-store` headers.
+
+---
+
+## Recent Security, FinOps & Reliability Enhancements
+
+- **Interactive Access Protection for Standalone Projects:** Added an automatic public-vs-IAP security prompt in `scripts/install.py` and `install.sh` (supporting custom or auto-generated `DASHBOARD_AUTH_TOKEN` stored in GCP Secret Manager, `--auth-token`, `--generate-token`, and Terraform `auth_token_secret_name`), paired with `AuthLockScreen.jsx` and header `Lock` button.
+- **Security Audit Hardening:** Added pre-auth brute-force lockout (`429` after 10 failures/min), rightmost proxy IP extraction on Cloud Run, removal of cross-project IAP wildcard audience fallback, `escapeHtml` XSS sanitization across every ECharts tooltip (`ChartsSection`, `ActivityHeatmap`, `ModelsAndFleetView`, `FinOpsBillingView`, `DeveloperDrawer`), React Hooks ordering fix in `DeveloperDrawer`, strict `ORG_PROJECTS` / dataset / protobuf varint bounds checks, and safe `Path.as_uri()` SQLite URIs + YAML JSON serialization.
+- **Multi-Source Telemetry (Antigravity + Vertex AI + Google AI Studio + Local Sync):** Added `backend/vertex_sync.py` (Vertex AI tokens/invocations and `2xx` AI Studio / Gemini API inference RPCs), expanded Cloud Billing SKU filters to cover `AI Studio` and `generativelanguage` alongside `Vertex AI` and `Gemini`, added privacy-safe local `~/.gemini/antigravity*` metadata sync, and added `EmptyOnboardingBanner.jsx` for zero-event onboarding.
+- **FinOps & Data Pipeline Accuracy:** Implemented `>200K` 2x long-context input/cache cost multipliers, 27-model pricing catalog (`Gemini 4`, `Gemini 3.8`, `Nano Banana 2.1`, `Gemini 3.5 Transcribe Live`, `Claude 4.x/5.5`), chunked BigQuery streaming dedup inserts (`row_ids` + `nextPageToken` pagination), numerical SemVer fleet sorting, continuous `GENERATE_DATE_ARRAY` daily spine, `Effort` filter, cross-platform Windows `scripts/install.py`, and Vitest + Pytest CI checks.
 
 ---
 
@@ -290,9 +312,9 @@ Every resource and BigQuery SQL job provisioned by `install.sh` and `terraform/`
 │   └── vertex_sync.py                 # Optional Vertex AI & Gemini API Cloud Monitoring collector
 ├── frontend/                          # React 19 + Tailwind CSS + Apache ECharts + Vitest SPA
 │   └── src/
-│       ├── App.jsx
-│       ├── utils/                     # Formatters, formula-safe CSV exporter & unit tests
-│       └── components/                # Executive, Models/Fleet, FinOps, Trajectories & Drawer views
+│       ├── App.jsx                    # SPA command bar, cross-filters & AuthLockScreen flow
+│       ├── utils/                     # Formatters, escapeHtml XSS helper, CSV exporter & tests
+│       └── components/                # Overview, Models/Fleet, FinOps, Trajectories, Drawer & AuthLockScreen
 ├── scripts/
 │   ├── install.py                     # Cross-platform turnkey installer (Windows/macOS/Linux)
 │   ├── bootstrap_bigquery.py          # Idempotent dataset, table, pricing & SQL view bootstrapper

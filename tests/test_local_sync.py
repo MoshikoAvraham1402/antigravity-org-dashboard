@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.sync_local_antigravity import parse_local_db_turns
+from backend.telemetry_utils import parse_protobuf_fields
+import pytest
 
 
 def _varint(val: int) -> bytes:
@@ -96,3 +98,12 @@ def test_parse_local_db_turns_extracts_metadata_without_reading_payload(tmp_path
     assert r["tool_calls_count"] == 1
     assert r["client_version"] == "2.32.1"
     assert "SECRET" not in str(r)
+
+
+def test_protobuf_decoder_rejects_truncated_varints_and_zero_field_tag():
+    with pytest.raises(ValueError):
+        parse_protobuf_fields(b"\x80")  # unterminated varint tag
+    with pytest.raises(ValueError):
+        parse_protobuf_fields(b"\x08\x80")  # unterminated varint value
+    with pytest.raises(ValueError):
+        parse_protobuf_fields(b"\x00\x01")  # invalid field number 0

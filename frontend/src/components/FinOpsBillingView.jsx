@@ -3,6 +3,7 @@ import ReactECharts from 'echarts-for-react';
 import { Receipt, Sparkles, CreditCard, BadgePercent, Search, Download } from 'lucide-react';
 import MetricTooltip from './MetricTooltip';
 import {
+  escapeHtml,
   formatCompactNumber,
   formatCurrency,
   formatShortDate,
@@ -45,11 +46,11 @@ export default function FinOpsBillingView({
           if (!params?.length) return '';
           const pt = dailySeries[params[0].dataIndex] || {};
           return `
-            <div style="font-weight:700;margin-bottom:5px">${formatReadableDate(pt.date)}</div>
+            <div style="font-weight:700;margin-bottom:5px">${escapeHtml(formatReadableDate(pt.date))}</div>
             <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.6">
               <span style="color:#f43f5e">●</span> Estimated Token Cost: <b>${formatCurrency(pt.estimated_cost_usd)}</b><br/>
               <span style="color:#10b981">●</span> Avoided via Prompt Cache: <b>${formatCurrency(pt.cache_savings_usd)}</b><br/>
-              <span style="color:#3b82f6">●</span> Cache Hit Rate: <b>${pt.cache_hit_rate_pct}%</b>
+              <span style="color:#3b82f6">●</span> Cache Hit Rate: <b>${Number(pt.cache_hit_rate_pct || 0)}%</b>
             </div>
           `;
         },

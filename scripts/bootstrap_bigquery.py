@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -318,8 +319,10 @@ def main() -> None:
     creds, detected = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     if not project_id:
         project_id = detected or ""
-    if not project_id:
-        raise SystemExit("Error: --project or GCP_PROJECT_ID is required.")
+    if not project_id or not re.match(r"^[A-Za-z0-9_\-]{1,128}$", project_id):
+        raise SystemExit("Error: valid --project or GCP_PROJECT_ID is required.")
+    if not re.match(r"^[A-Za-z0-9_]{1,128}$", args.monitoring_dataset) or not re.match(r"^[A-Za-z0-9_]{1,128}$", args.raw_dataset):
+        raise SystemExit("Error: invalid BigQuery dataset identifier.")
 
     print(f"==> Bootstrapping BigQuery analytics foundation in project '{project_id}' ({args.location})...")
     bq = bigquery.Client(project=project_id, credentials=creds)

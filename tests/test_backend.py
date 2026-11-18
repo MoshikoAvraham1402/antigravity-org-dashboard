@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import types
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,7 @@ from backend.telemetry_utils import (
     parse_semver_key,
 )
 from backend.vertex_sync import collect_project_vertex_rows
+from scripts import install as installer
 
 
 def test_semver_sorting_orders_minor_and_patch_numerically():
@@ -128,7 +130,20 @@ def test_vertex_monitoring_collection_creates_deterministic_rows():
             }
         ]
     }
-    empty_payload = {"timeSeries": []}
+    aistudio_payload = {
+        "timeSeries": [
+            {
+                "metric": {"labels": {"response_code_class": "2xx"}},
+                "resource": {"labels": {"method": "google.ai.generativelanguage.v1beta.GenerativeService.GenerateContent"}},
+                "points": [{"interval": {"endTime": "2026-11-18T05:00:00Z"}, "value": {"int64Value": "14"}}],
+            },
+            {
+                "metric": {"labels": {"response_code_class": "2xx"}},
+                "resource": {"labels": {"method": "google.ai.generativelanguage.v1beta.ModelService.ListModels"}},
+                "points": [{"interval": {"endTime": "2026-11-18T05:00:00Z"}, "value": {"int64Value": "50"}}],
+            },
+        ]
+    }
 
     class FakeResp:
         def __init__(self, body):
@@ -144,7 +159,7 @@ def test_vertex_monitoring_collection_creates_deterministic_rows():
             return FakeResp(tok_payload)
         if "model_invocation_count" in flt:
             return FakeResp(inv_payload)
-        return FakeResp(empty_payload)
+        return FakeResp(aistudio_payload)
 
     with patch("backend.vertex_sync.requests.get", side_effect=fake_get):
         rows = collect_project_vertex_rows(
@@ -155,15 +170,20 @@ def test_vertex_monitoring_collection_creates_deterministic_rows():
             existing_ids=set(),
         )
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["request_id"] == "vertex:demo-proj:gemini-4-hydrogen:global:2026-11-18T05:00:00Z"
+    assert len(rows) == 2
+    by_id = {r["request_id"]: r for r in rows}
+    row = by_id["vertex:demo-proj:gemini-4-hydrogen:global:2026-11-18T05:00:00Z"]
     assert row["prompt_tokens"] == 1200
     assert row["output_tokens"] == 350
     assert row["total_tokens"] == 1550
     assert row["request_count"] == 9
     assert row["client_name"] == "vertex_ai"
     assert main.validate_user_email(row["user_email"]) == "vertex-api@demo-proj.gcp.internal"
+
+    ai_row = by_id["aistudio:demo-proj:GenerateContent:2026-11-18T05:00:00Z"]
+    assert ai_row["request_count"] == 14
+    assert ai_row["client_name"] == "gemini_api"
+    assert main.validate_user_email(ai_row["user_email"]) == "gemini-api@demo-proj.gcp.internal"
 
 
 def test_get_gcp_credentials_falls_back_to_gcloud_cli_locally(monkeypatch):
@@ -191,3 +211,177 @@ def test_get_gcp_credentials_falls_back_to_gcloud_cli_locally(monkeypatch):
         creds, proj = get_gcp_credentials()
         assert creds.token == "fake-cli-token"
         assert proj == "demo-proj"
+
+
+def test_extract_client_ip_uses_rightmost_xff_on_cloud_run(monkeypatch):
+    req = types.SimpleNamespace(
+        headers={"x-forwarded-for": "198.51.100.99, 203.0.113.10"},
+        client=types.SimpleNamespace(host="127.0.0.1"),
+    )
+    monkeypatch.setattr(main, "IS_CLOUD_RUN", True)
+    assert main._extract_client_ip(req) == "203.0.113.10"
+
+    monkeypatch.setattr(main, "IS_CLOUD_RUN", False)
+    assert main._extract_client_ip(req) == "198.51.100.99"
+
+
+def test_dashboard_auth_token_enforcement_and_bruteforce_limit(monkeypatch):
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_TOKEN", "top-secret-passphrase")
+    monkeypatch.setattr(main, "IS_CLOUD_RUN", True)
+    main._auth_fail_buckets.clear()
+    main._read_buckets.clear()
+
+    client = TestClient(main.app)
+
+    # /api/health remains open for load balancer / Cloud Run health probes
+    health = client.get("/api/health")
+    assert health.status_code == 200
+
+    # Missing token returns 401 + Bearer challenge + no-store
+    r_no_tok = client.get(
+        "/api/dashboard",
+        headers={"X-Requested-With": "AntigravityDashboard", "X-Forwarded-For": "198.51.100.5"},
+    )
+    assert r_no_tok.status_code == 401
+    assert r_no_tok.headers.get("www-authenticate") == "Bearer"
+    assert r_no_tok.headers.get("cache-control") == "no-store, max-age=0"
+
+    # Brute-force 9 more wrong attempts -> total 10 failures -> 11th returns 429 pre-auth
+    for _ in range(9):
+        r_bad = client.get(
+            "/api/dashboard",
+            headers={
+                "X-Requested-With": "AntigravityDashboard",
+                "Authorization": "Bearer wrong-guess",
+                "X-Forwarded-For": "198.51.100.5",
+            },
+        )
+        assert r_bad.status_code == 401
+
+    r_locked = client.get(
+        "/api/dashboard",
+        headers={
+            "X-Requested-With": "AntigravityDashboard",
+            "Authorization": "Bearer top-secret-passphrase",
+            "X-Forwarded-For": "198.51.100.5",
+        },
+    )
+    assert r_locked.status_code == 429
+
+    # Clean IP with valid token succeeds
+    with patch.object(main, "_compute_dashboard_payload", return_value={"meta": {"token_auth_enabled": True}}):
+        r_ok = client.get(
+            "/api/dashboard",
+            headers={
+                "X-Requested-With": "AntigravityDashboard",
+                "Authorization": "Bearer top-secret-passphrase",
+                "X-Forwarded-For": "203.0.113.42",
+            },
+        )
+    assert r_ok.status_code == 200
+    assert r_ok.json()["meta"]["token_auth_enabled"] is True
+    main._auth_fail_buckets.clear()
+    main._read_buckets.clear()
+
+
+def test_iap_audience_rejects_foreign_project_service_name(monkeypatch):
+    monkeypatch.setattr(main, "PROJECT_ID", "host-proj")
+    monkeypatch.setattr(main, "PROJECT_NUMBER", "")
+    monkeypatch.setattr(main, "_resolved_project_number", None)
+    monkeypatch.setattr(main, "EXPLICIT_IAP_AUDIENCE", "")
+    monkeypatch.setattr(main, "IS_CLOUD_RUN", False)
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_TOKEN", "")
+
+    req = types.SimpleNamespace(
+        url=types.SimpleNamespace(path="/api/dashboard"),
+        headers={"x-goog-iap-jwt-assertion": "fake.jwt.token"},
+    )
+    foreign_claims = {
+        "iss": "https://cloud.google.com/iap",
+        "aud": f"/projects/999999999/locations/{main.REGION}/services/{main.SERVICE_NAME}",
+        "email": "attacker@other.example",
+    }
+    with patch("backend.main.id_token.verify_token", return_value=foreign_claims):
+        with pytest.raises(main.HTTPException) as exc_info:
+            main.verify_iap_assertion(req)
+    assert exc_info.value.status_code == 403
+
+
+def test_discover_projects_filters_invalid_env_ids(monkeypatch):
+    main._proj_discovery_cache = None
+    monkeypatch.setattr(main, "PROJECT_ID", "host-proj")
+    monkeypatch.setenv("ORG_PROJECTS", "host-proj, valid-proj-2, bad;proj, bad/proj")
+    with patch("backend.main.http_requests.get", side_effect=RuntimeError("skip crm")):
+        ids, _ = main.discover_accessible_projects(token="fake")
+    assert ids == ["host-proj", "valid-proj-2"]
+    main._proj_discovery_cache = None
+
+
+def test_installer_choose_access_security_no_org_and_token_options(monkeypatch):
+    mode, tok, auto = installer.choose_access_security(
+        org_id="",
+        explicit_access="public",
+        explicit_token="",
+        generate_token=True,
+        no_prompt=False,
+    )
+    assert mode == "public"
+    assert len(tok) >= 20
+    assert auto is True
+
+    mode, tok, auto = installer.choose_access_security(
+        org_id="",
+        explicit_access=None,
+        explicit_token="custom-pass-99",
+        generate_token=False,
+        no_prompt=False,
+    )
+    assert mode == "public"
+    assert tok == "custom-pass-99"
+    assert auto is False
+
+    # Interactive without org: user selects [1] Password-protected and enters custom password
+    monkeypatch.setattr(installer.sys.stdin, "isatty", lambda: True)
+    with (
+        patch("builtins.input", return_value="1"),
+        patch("scripts.install.getpass.getpass", return_value="my-secure-password"),
+    ):
+        mode, tok, auto = installer.choose_access_security(
+            org_id="",
+            explicit_access=None,
+            explicit_token="",
+            generate_token=False,
+            no_prompt=False,
+        )
+    assert mode == "public"
+    assert tok == "my-secure-password"
+    assert auto is False
+
+    # Interactive with explicit --access public: still offers password choice, auto-generates on empty Enter
+    with (
+        patch("builtins.input", return_value="1"),
+        patch("scripts.install.getpass.getpass", return_value=""),
+    ):
+        mode, tok, auto = installer.choose_access_security(
+            org_id="",
+            explicit_access="public",
+            explicit_token="",
+            generate_token=False,
+            no_prompt=False,
+        )
+    assert mode == "public"
+    assert len(tok) >= 20
+    assert auto is True
+
+    # Interactive without org: user explicitly picks open public [2]
+    with patch("builtins.input", return_value="2"):
+        mode, tok, auto = installer.choose_access_security(
+            org_id="",
+            explicit_access=None,
+            explicit_token="",
+            generate_token=False,
+            no_prompt=False,
+        )
+    assert mode == "public"
+    assert tok == ""
+    assert auto is False

@@ -83,13 +83,27 @@ gcloud iap web add-iam-policy-binding \
   --role="roles/iap.httpsResourceAccessor"
 ```
 
-### Mode 2: Public URL (`--access public`)
-If you want the dashboard accessible via its HTTPS URL without IAP (for demos, shared executive links, or when your GCP Org does not use IAP):
+### Mode 2: Password / Token-Protected Public URL (`--generate-token` or `--auth-token`)
+When your project does not have a Google Cloud Organization (so built-in Workspace IAP is unavailable), both `install.sh` and `scripts/install.py` notify you before deploying publicly and let you protect the dashboard with `DASHBOARD_AUTH_TOKEN` (stored in **GCP Secret Manager** `antigravity-dashboard-auth-token` and unlocked via the browser lock screen):
+```bash
+# Interactive prompt (warns if no GCP Org exists and asks whether to enter or auto-generate a password):
+python scripts/install.py --project YOUR_HOST_PROJECT_ID
+
+# Non-interactive with auto-generated Secret Manager password:
+./install.sh \
+  --project YOUR_HOST_PROJECT_ID \
+  --access public \
+  --generate-token
+```
+
+### Mode 3: Open Public URL (`--access public --no-auth-prompt`)
+If you intentionally want the dashboard accessible via its HTTPS URL without IAP or a password (for open demos):
 ```bash
 ./install.sh \
   --project YOUR_HOST_PROJECT_ID \
   --org YOUR_GCP_ORG_ID \
-  --access public
+  --access public \
+  --no-auth-prompt
 ```
 > **Note:** If your GCP Organization enforces the `constraints/iam.allowedPolicyMemberDomains` Organization Policy, granting `allUsers` (`--access public`) will be blocked by GCP unless an Org Policy exception is configured on the host project. See [Troubleshooting](TROUBLESHOOTING.md#1-domain-restricted-sharing-blocks---access-public).
 
@@ -118,7 +132,7 @@ gcloud organizations add-iam-policy-binding YOUR_GCP_ORG_ID \
 
 ## 6. Linking Google Cloud Billing Standard Export (Optional)
 
-To unlock actual invoice Gross Cost, Negotiated Credits, Net Spend, and SKU-level breakdowns in the **FinOps & Cloud Billing** workspace tab:
+To unlock actual invoice Gross Cost, Negotiated Credits, Net Spend, and SKU-level breakdowns (covering **Google AI Studio / Generative Language API**, **Vertex AI**, **Gemini Enterprise / Code Assist**, and **Antigravity** SKUs) in the **FinOps & Cloud Billing** workspace tab:
 
 1. Locate your existing BigQuery **Standard Usage Cost Export** table (`gcp_billing_export_v1_XXXXXX_XXXXXX_XXXXXX`).
 2. **Important Region Requirement:** BigQuery requires joined/queried datasets in the same query or region context to match location. Deploy your dashboard datasets in the **same BigQuery location** (`--bq-location US` or `--bq-location EU`) as your billing export dataset!

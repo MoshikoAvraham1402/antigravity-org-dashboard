@@ -2,8 +2,10 @@ import React, { useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { X, Layers, Zap, Sparkles, Gauge } from 'lucide-react';
 import {
+  escapeHtml,
   formatCompactNumber,
   formatCurrency,
+  formatFullNumber,
   formatReadableDate,
   formatShortDate,
   formatDurationMin,
@@ -16,8 +18,6 @@ export default function DeveloperDrawer({
   darkMode,
   onClose,
 }) {
-  if (!userSummary) return null;
-
   const dailyActivity = drilldown?.daily_activity || [];
 
   const sparklineOption = useMemo(() => {
@@ -34,10 +34,10 @@ export default function DeveloperDrawer({
           if (!params?.length) return '';
           const idx = params[0].dataIndex;
           const pt = dailyActivity[idx] || {};
-          return `<div style="font-weight:700">${formatReadableDate(pt.date)}</div>
+          return `<div style="font-weight:700">${escapeHtml(formatReadableDate(pt.date))}</div>
             <div style="font-family:'JetBrains Mono',monospace;margin-top:3px">
               Tokens: ${formatCompactNumber(pt.total_tokens)}<br/>
-              Turns: ${pt.requests ?? 0} · Tools: ${pt.tool_calls ?? 0}<br/>
+              Turns: ${formatFullNumber(pt.requests)} · Tools: ${formatFullNumber(pt.tool_calls)}<br/>
               Spend: ${formatCurrency(pt.estimated_cost_usd)} · Saved: ${formatCurrency(pt.cache_savings_usd)}
             </div>`;
         },
@@ -69,6 +69,8 @@ export default function DeveloperDrawer({
       ],
     };
   }, [dailyActivity, darkMode]);
+
+  if (!userSummary) return null;
 
   return (
     <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] shadow-sm p-5 flex flex-col gap-4 h-fit">

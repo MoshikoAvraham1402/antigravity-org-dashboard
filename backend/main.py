@@ -49,9 +49,19 @@ MONITORING_DATASET = os.getenv("MONITORING_DATASET", "antigravity_monitoring").s
 RAW_LOGS_DATASET = os.getenv("RAW_LOGS_DATASET", "antigravity_raw_logs").strip()
 ENABLE_VERTEX_TELEMETRY = os.getenv("ENABLE_VERTEX_TELEMETRY", "true").lower() == "true"
 
+_BQ_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 _BQ_FQN_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _RAW_BILLING_TABLE = os.getenv("BILLING_EXPORT_TABLE", "").strip().strip("`")
 BILLING_TABLE = _RAW_BILLING_TABLE if _BQ_FQN_RE.match(_RAW_BILLING_TABLE) else ""
+
+if PROJECT_ID and not _BQ_ID_RE.match(PROJECT_ID):
+    raise RuntimeError("Invalid GCP_PROJECT_ID configuration.")
+if not _BQ_ID_RE.match(MONITORING_DATASET):
+    raise RuntimeError("Invalid MONITORING_DATASET configuration.")
+if not _BQ_ID_RE.match(RAW_LOGS_DATASET):
+    raise RuntimeError("Invalid RAW_LOGS_DATASET configuration.")
+if not _BQ_ID_RE.match(SERVICE_NAME):
+    SERVICE_NAME = "antigravity-usage-dashboard"
 
 HIST_REAL_TABLE = "real_historical_inference_logs"
 PROJECT_DIR_TABLE = "project_directory"
@@ -108,6 +118,7 @@ app = FastAPI(
 
 _bq_client: bigquery.Client | None = None
 _resolved_project_id: str | None = None
+_resolved_project_number: str | None = None
 _bq_init_lock = threading.Lock()
 _google_auth_req = google.auth.transport.requests.Request()
 
@@ -123,6 +134,7 @@ _PROJ_DISCOVERY_TTL_SEC = 900.0  # 15 minutes
 _rate_lock = threading.Lock()
 _read_buckets: dict[str, collections.deque[float]] = collections.defaultdict(collections.deque)
 _sync_buckets: dict[str, collections.deque[float]] = collections.defaultdict(collections.deque)
+_auth_fail_buckets: dict[str, collections.deque[float]] = collections.defaultdict(collections.deque)
 
 _sync_exec_lock = threading.Lock()
 _last_global_sync_mono: float = 0.0
@@ -177,13 +189,51 @@ def _check_rate_limit(
         return True
 
 
+def _get_project_number() -> str:
+    global _resolved_project_number
+    if PROJECT_NUMBER:
+        return PROJECT_NUMBER
+    if _resolved_project_number:
+        return _resolved_project_number
+    if IS_CLOUD_RUN:
+        try:
+            resp = http_requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/project/numeric-project-id",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=2,
+            )
+            if resp.status_code == 200 and resp.text.strip().isdigit():
+                _resolved_project_number = resp.text.strip()
+                return _resolved_project_number
+        except Exception:
+            pass
+    return ""
+
+
+def _extract_client_ip(request: Request) -> str:
+    """Extract client IP safely. On Cloud Run / GFE, the rightmost X-Forwarded-For entry
+    is proxy-appended and cannot be spoofed by client-supplied left-side entries."""
+    xff = request.headers.get("x-forwarded-for", "").strip()
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1] if IS_CLOUD_RUN else parts[0]
+    return request.client.host if request.client else "unknown"
+
+
 def verify_iap_assertion(request: Request) -> str:
     """Verifies Google Cloud IAP ES256 JWT assertion (or optional DASHBOARD_AUTH_TOKEN)."""
     if DASHBOARD_AUTH_TOKEN and request.url.path.startswith("/api/"):
         auth_hdr = request.headers.get("authorization", "").strip()
         token_val = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
-        if not token_val or not hmac.compare_digest(token_val, DASHBOARD_AUTH_TOKEN):
-            raise HTTPException(status_code=401, detail="Invalid or missing dashboard bearer token.")
+        if not token_val or not hmac.compare_digest(
+            token_val.encode("utf-8"), DASHBOARD_AUTH_TOKEN.encode("utf-8")
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Dashboard password/token required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     assertion = request.headers.get("x-goog-iap-jwt-assertion", "").strip()
     if not assertion:
@@ -211,25 +261,22 @@ def verify_iap_assertion(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Invalid token issuer.")
 
     proj_id = get_project_id()
+    proj_num = _get_project_number()
     allowed_audiences = {
         f"/projects/{proj_id}/locations/{REGION}/services/{SERVICE_NAME}",
     }
     if EXPLICIT_IAP_AUDIENCE:
         allowed_audiences.add(EXPLICIT_IAP_AUDIENCE)
-    if PROJECT_NUMBER:
+    if proj_num:
         allowed_audiences.update(
             {
-                f"/projects/{PROJECT_NUMBER}/locations/{REGION}/services/{SERVICE_NAME}",
-                f"/projects/{PROJECT_NUMBER}/iap_web/cloud_run-{REGION}/services/{SERVICE_NAME}",
-                f"https://{SERVICE_NAME}-{PROJECT_NUMBER}.{REGION}.run.app",
+                f"/projects/{proj_num}/locations/{REGION}/services/{SERVICE_NAME}",
+                f"/projects/{proj_num}/iap_web/cloud_run-{REGION}/services/{SERVICE_NAME}",
+                f"https://{SERVICE_NAME}-{proj_num}.{REGION}.run.app",
             }
         )
 
-    aud_ok = (
-        (aud in allowed_audiences)
-        or (bool(PROJECT_NUMBER) and aud.startswith(f"/projects/{PROJECT_NUMBER}/"))
-        or (not PROJECT_NUMBER and not EXPLICIT_IAP_AUDIENCE and f"/services/{SERVICE_NAME}" in aud)
-    )
+    aud_ok = (aud in allowed_audiences) or (bool(proj_num) and aud.startswith(f"/projects/{proj_num}/"))
     if not aud_ok:
         logger.warning("Unexpected IAP JWT audience: %s", aud)
         raise HTTPException(status_code=403, detail="Token audience mismatch.")
@@ -252,19 +299,34 @@ async def zero_trust_security_middleware(request: Request, call_next: Any) -> An
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         return resp
 
+    client_ip = _extract_client_ip(request)
+
+    if path.startswith("/api/") and DASHBOARD_AUTH_TOKEN:
+        with _rate_lock:
+            dq = _auth_fail_buckets.get(client_ip)
+            now = time.monotonic()
+            if dq and len([t for t in dq if (now - t) <= 60.0]) >= 10:
+                resp = JSONResponse({"detail": "Too many failed authentication attempts. Wait 60s."}, status_code=429)
+                for hk, hv in SECURITY_HEADERS.items():
+                    resp.headers[hk] = hv
+                resp.headers["Cache-Control"] = "no-store, max-age=0"
+                return resp
+
     try:
         viewer_email = verify_iap_assertion(request)
     except HTTPException as auth_exc:
+        if path.startswith("/api/") and auth_exc.status_code == 401 and DASHBOARD_AUTH_TOKEN:
+            _check_rate_limit(_auth_fail_buckets, client_ip, limit=100, window_sec=60.0)
         resp = JSONResponse({"detail": auth_exc.detail}, status_code=auth_exc.status_code)
         for hk, hv in SECURITY_HEADERS.items():
             resp.headers[hk] = hv
+        if auth_exc.headers:
+            for hk, hv in auth_exc.headers.items():
+                resp.headers[hk] = hv
         resp.headers["Cache-Control"] = "no-store, max-age=0"
         return resp
 
     request.state.viewer_email = viewer_email
-    client_ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
-        request.client.host if request.client else "unknown"
-    )
     rate_key = f"{viewer_email}:{client_ip}"
 
     if path.startswith("/api/"):
@@ -272,6 +334,7 @@ async def zero_trust_security_middleware(request: Request, call_next: Any) -> An
             resp = JSONResponse({"detail": "Missing required security header."}, status_code=403)
             for hk, hv in SECURITY_HEADERS.items():
                 resp.headers[hk] = hv
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
             return resp
 
         sec_fetch_site = request.headers.get("sec-fetch-site", "").lower()
@@ -279,6 +342,7 @@ async def zero_trust_security_middleware(request: Request, call_next: Any) -> An
             resp = JSONResponse({"detail": "Cross-site API requests are forbidden."}, status_code=403)
             for hk, hv in SECURITY_HEADERS.items():
                 resp.headers[hk] = hv
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
             return resp
 
         if request.method == "POST":
@@ -290,18 +354,21 @@ async def zero_trust_security_middleware(request: Request, call_next: Any) -> An
                     resp = JSONResponse({"detail": "Origin mismatch."}, status_code=403)
                     for hk, hv in SECURITY_HEADERS.items():
                         resp.headers[hk] = hv
+                    resp.headers["Cache-Control"] = "no-store, max-age=0"
                     return resp
 
             if not _check_rate_limit(_sync_buckets, rate_key, limit=3, window_sec=60.0):
                 resp = JSONResponse({"detail": "Too many sync requests. Please wait before retrying."}, status_code=429)
                 for hk, hv in SECURITY_HEADERS.items():
                     resp.headers[hk] = hv
+                resp.headers["Cache-Control"] = "no-store, max-age=0"
                 return resp
         else:
             if not _check_rate_limit(_read_buckets, rate_key, limit=45, window_sec=60.0):
                 resp = JSONResponse({"detail": "Rate limit exceeded."}, status_code=429)
                 for hk, hv in SECURITY_HEADERS.items():
                     resp.headers[hk] = hv
+                resp.headers["Cache-Control"] = "no-store, max-age=0"
                 return resp
 
     response = await call_next(request)
@@ -368,7 +435,11 @@ def discover_accessible_projects(token: str | None = None) -> tuple[list[str], d
             return _proj_discovery_cache[1], _proj_discovery_cache[2]
 
     host_project = get_project_id()
-    env_projects = [p.strip() for p in os.getenv("ORG_PROJECTS", "").split(",") if p.strip()]
+    env_projects = [
+        p.strip()
+        for p in os.getenv("ORG_PROJECTS", "").split(",")
+        if p.strip() and _BQ_ID_RE.match(p.strip())
+    ]
     env_map_raw = os.getenv("PROJECT_NUMBER_MAP_JSON", "").strip()
     num_map: dict[str, str] = {}
     if env_map_raw:
@@ -399,7 +470,7 @@ def discover_accessible_projects(token: str | None = None) -> tuple[list[str], d
             for p in resp.json().get("projects", []):
                 pid = p.get("projectId")
                 pnum = str(p.get("projectNumber") or "")
-                if pid:
+                if pid and _BQ_ID_RE.match(pid):
                     if not env_projects:
                         discovered_ids.append(pid)
                     if pnum:
@@ -863,12 +934,14 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
         inserted = 0
         if new_rows:
             hist_fqn = f"{proj_id}.{MONITORING_DATASET}.{HIST_REAL_TABLE}"
-            row_ids = [r["request_id"] for r in new_rows]
-            errors = client.insert_rows_json(hist_fqn, new_rows, row_ids=row_ids)
-            if not errors:
-                inserted = len(new_rows)
-            else:
-                logger.warning("Partial streaming insert errors: %s", errors[:2])
+            for start in range(0, len(new_rows), 500):
+                chunk = new_rows[start : start + 500]
+                chunk_ids = [r["request_id"] for r in chunk]
+                errors = client.insert_rows_json(hist_fqn, chunk, row_ids=chunk_ids)
+                if not errors:
+                    inserted += len(chunk)
+                else:
+                    logger.warning("Partial streaming insert errors: %s", errors[:2])
 
         return {
             "inserted_rows": inserted,
@@ -1377,7 +1450,7 @@ def _compute_dashboard_payload(
         WHERE _PARTITIONTIME >= TIMESTAMP_SUB(TIMESTAMP(@anchor_max_date), INTERVAL (@days + 3) DAY)
           AND DATE(usage_start_time) > DATE_SUB(@anchor_max_date, INTERVAL @days DAY)
           AND DATE(usage_start_time) <= @anchor_max_date
-          AND REGEXP_CONTAINS(LOWER(CONCAT(service.description, ' ', sku.description)), r'gemini enterprise|code assist|antigravity|vertex ai|generative|claude|gemini|anthropic|cloud speech')
+          AND REGEXP_CONTAINS(LOWER(CONCAT(service.description, ' ', sku.description)), r'gemini enterprise|code assist|antigravity|vertex ai|generative|generativelanguage|ai studio|claude|gemini|anthropic|cloud speech')
           AND NOT REGEXP_CONTAINS(LOWER(sku.description), r'colab|persistent disk|storage|network')
         GROUP BY 1, 2, 3
         HAVING ABS(gross_cost_usd) >= 0.01 OR ABS(net_cost_usd) >= 0.01
@@ -1526,6 +1599,7 @@ def _compute_dashboard_payload(
             "billing_enabled": bool(BILLING_TABLE),
             "billing_table": BILLING_TABLE,
             "vertex_telemetry_enabled": ENABLE_VERTEX_TELEMETRY,
+            "token_auth_enabled": bool(DASHBOARD_AUTH_TOKEN),
             "active_source": "live",
             "sink_status": sink_status,
             "days": days,
