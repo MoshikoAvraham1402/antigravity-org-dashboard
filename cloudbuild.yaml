@@ -1,0 +1,69 @@
+# ==============================================================================
+# Automated Cloud Build CI/CD Pipeline for Antigravity Organization Dashboard
+# Trigger via:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_ORG_ID=123456789012,_ORG_DOMAIN=example.com
+# ==============================================================================
+substitutions:
+  _SERVICE_NAME: antigravity-usage-dashboard
+  _REGION: us-central1
+  _REPOSITORY: cloud-run-source-deploy
+  _ORG_ID: ""
+  _ORG_DOMAIN: ""
+  _ORG_TIMEZONE: UTC
+  _MONITORING_DATASET: antigravity_monitoring
+  _RAW_LOGS_DATASET: antigravity_raw_logs
+  _SINK_NAME: antigravity-org-bq-sink
+  _BILLING_EXPORT_TABLE: ""
+  _REQUIRE_IAP_AUTH: "true"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: ensure-artifact-repo
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud artifacts repositories describe "${_REPOSITORY}" --location="${_REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1 || \
+        gcloud artifacts repositories create "${_REPOSITORY}" --repository-format=docker --location="${_REGION}" --project="${PROJECT_ID}"
+
+  - id: build-container
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${BUILD_ID}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:latest
+      - .
+
+  - id: push-container
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}
+
+  - id: deploy-cloud-run
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE_NAME}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${BUILD_ID}
+      - --region=${_REGION}
+      - --project=${PROJECT_ID}
+      - --memory=512Mi
+      - --cpu=1
+      - --max-instances=5
+      - --concurrency=40
+      - --port=8080
+      - --update-env-vars=GCP_PROJECT_ID=${PROJECT_ID},GCP_PROJECT_NUMBER=${PROJECT_NUMBER},GCP_REGION=${_REGION},GCP_ORG_ID=${_ORG_ID},GCP_ORG_DOMAIN=${_ORG_DOMAIN},ORG_TIMEZONE=${_ORG_TIMEZONE},MONITORING_DATASET=${_MONITORING_DATASET},RAW_LOGS_DATASET=${_RAW_LOGS_DATASET},LOGGING_SINK_NAME=${_SINK_NAME},BILLING_EXPORT_TABLE=${_BILLING_EXPORT_TABLE},REQUIRE_IAP_AUTH=${_REQUIRE_IAP_AUTH}
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:${BUILD_ID}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_SERVICE_NAME}:latest

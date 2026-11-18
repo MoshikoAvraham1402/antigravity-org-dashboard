@@ -1,0 +1,16 @@
+project_id      = "your-gcp-project-id"
+region          = "us-central1"
+bq_location     = "US"
+container_image = "us-central1-docker.pkg.dev/your-gcp-project-id/cloud-run-source-deploy/antigravity-usage-dashboard:latest"
+
+# Organization-wide Cloud Logging capture (recommended)
+org_id       = "123456789012"
+org_domain   = "example.com"
+org_timezone = "UTC"
+
+# Optional: Link BigQuery Cloud Billing Standard Export table for SKU invoice reconciliation
+billing_export_table = ""
+
+# Security: Keep false for Zero-Trust IAP; set true only for public access
+allow_public_access  = false
+grant_org_sync_roles = true
