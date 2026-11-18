@@ -61,7 +61,7 @@ EXPLICIT_IAP_AUDIENCE = os.getenv("IAP_AUDIENCE", "").strip()
 REQUIRE_IAP_AUTH = os.getenv("REQUIRE_IAP_AUTH", "false").lower() == "true"
 
 _ALLOWED_DAYS = frozenset({7, 14, 30, 90})
-_SAFE_FILTER_RE = re.compile(r"^[A-Za-z0-9._ ()\-]{1,80}$")
+_SAFE_FILTER_RE = re.compile(r"^[A-Za-z0-9._ :()\-]{1,80}$")
 _SAFE_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 _SAFE_TZ_RE = re.compile(r"^[A-Za-z0-9_/\-+]{1,48}$")
 if not _SAFE_TZ_RE.match(ORG_TIMEZONE):
@@ -92,7 +92,7 @@ SECURITY_HEADERS = {
 # Disable Swagger / ReDoc / OpenAPI schema exposure in production
 app = FastAPI(
     title="Antigravity Organization Intelligence Dashboard",
-    version="3.1.0",
+    version="3.2.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -603,10 +603,12 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
     priced_events AS (
       SELECT *
       FROM formatted_events
-      WHERE (@surface = 'ALL' OR surface = @surface)
+      WHERE (@project = 'ALL' OR project_id = @project)
+        AND (@surface = 'ALL' OR surface = @surface)
         AND (@model = 'ALL' OR model_id = @model)
         AND (@provider = 'ALL' OR model_provider = @provider)
         AND (@quota = 'ALL' OR quota_tier = @quota)
+        AND (@effort = 'ALL' OR effort_level = @effort)
     )
     """
     return cte_sql, status
@@ -662,10 +664,12 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
         """
         recent_params = [
             bigquery.ScalarQueryParameter("lookback_days", "INT64", 2),
+            bigquery.ScalarQueryParameter("project", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("surface", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("model", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("provider", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("quota", "STRING", "ALL"),
+            bigquery.ScalarQueryParameter("effort", "STRING", "ALL"),
         ]
         try:
             recent_rows = run_query(recent_sql, recent_params, bypass_bq_cache=True)
@@ -814,14 +818,16 @@ def calc_delta_pct(curr: float | int | None, prev: float | int | None) -> float 
 
 def _compute_dashboard_payload(
     days: int,
+    project: str,
     surface: str,
     model: str,
     provider: str,
     quota: str,
+    effort: str,
     viewer_email: str,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    cache_key = f"real_dash_v3:{days}:{surface}:{model}:{provider}:{quota}"
+    cache_key = f"real_dash_v4:{days}:{project}:{surface}:{model}:{provider}:{quota}:{effort}"
     cached = _get_cached(cache_key, refresh=force_refresh)
     if cached is not None:
         out = dict(cached)
@@ -835,10 +841,12 @@ def _compute_dashboard_payload(
     base_params = [
         bigquery.ScalarQueryParameter("days", "INT64", days),
         bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
+        bigquery.ScalarQueryParameter("project", "STRING", project),
         bigquery.ScalarQueryParameter("surface", "STRING", surface),
         bigquery.ScalarQueryParameter("model", "STRING", model),
         bigquery.ScalarQueryParameter("provider", "STRING", provider),
         bigquery.ScalarQueryParameter("quota", "STRING", quota),
+        bigquery.ScalarQueryParameter("effort", "STRING", effort),
     ]
 
     kpi_sql = f"""
@@ -1274,9 +1282,11 @@ def _compute_dashboard_payload(
       GROUP BY model_id
     )
     SELECT
-      (SELECT ARRAY_AGG(DISTINCT surface ORDER BY surface) FROM formatted_events) AS surfaces,
+      (SELECT ARRAY_AGG(DISTINCT project_id ORDER BY project_id) FROM formatted_events WHERE project_id IS NOT NULL AND project_id != '') AS projects,
+      (SELECT ARRAY_AGG(DISTINCT surface ORDER BY surface) FROM formatted_events WHERE surface IS NOT NULL AND surface != '') AS surfaces,
       (SELECT ARRAY_AGG(STRUCT(model_id AS value, model_display_name AS label) ORDER BY model_display_name) FROM distinct_models) AS models,
-      (SELECT ARRAY_AGG(DISTINCT model_provider ORDER BY model_provider) FROM formatted_events) AS providers
+      (SELECT ARRAY_AGG(DISTINCT model_provider ORDER BY model_provider) FROM formatted_events WHERE model_provider IS NOT NULL AND model_provider != '') AS providers,
+      (SELECT ARRAY_AGG(DISTINCT effort_level ORDER BY effort_level) FROM formatted_events WHERE effort_level IS NOT NULL AND effort_level != '') AS efforts
     """
 
     billing_skus_sql = ""
@@ -1433,7 +1443,7 @@ def _compute_dashboard_payload(
         reverse=True,
     )
 
-    facets = facet_rows[0] if facet_rows else {"surfaces": [], "models": [], "providers": []}
+    facets = facet_rows[0] if facet_rows else {"projects": [], "surfaces": [], "models": [], "providers": [], "efforts": []}
 
     payload = {
         "meta": {
@@ -1453,9 +1463,11 @@ def _compute_dashboard_payload(
             "date_from": kpi_raw.get("min_date"),
             "date_to": kpi_raw.get("max_date"),
             "latest_event_ts": kpi_raw.get("latest_event_ts"),
+            "available_projects": facets.get("projects") or [],
             "available_surfaces": facets.get("surfaces") or [],
             "available_models": [dict(m) if not isinstance(m, dict) else m for m in (facets.get("models") or [])],
             "available_providers": facets.get("providers") or [],
+            "available_efforts": facets.get("efforts") or [],
             "available_quotas": [
                 {"value": "REGULAR_QUOTA", "label": "Included Subscription"},
                 {"value": "OVERAGE_QUOTA", "label": "Overage (Pay-As-You-Go)"},
@@ -1483,25 +1495,31 @@ def _compute_dashboard_payload(
 def get_dashboard_data(
     request: Request,
     days: int = Query(default=30),
+    project: str = Query(default="ALL"),
     surface: str = Query(default="ALL"),
     model: str = Query(default="ALL"),
     provider: str = Query(default="ALL"),
     quota: str = Query(default="ALL"),
+    effort: str = Query(default="ALL"),
 ) -> dict[str, Any]:
     safe_days = validate_days(days)
+    safe_project = validate_filter(project, "project")
     safe_surface = validate_filter(surface, "surface")
     safe_model = validate_filter(model, "model")
     safe_provider = validate_filter(provider, "provider")
     safe_quota = validate_filter(quota, "quota")
+    safe_effort = validate_filter(effort, "effort")
     viewer_email = getattr(request.state, "viewer_email", "")
 
     try:
         return _compute_dashboard_payload(
             days=safe_days,
+            project=safe_project,
             surface=safe_surface,
             model=safe_model,
             provider=safe_provider,
             quota=safe_quota,
+            effort=safe_effort,
             viewer_email=viewer_email,
             force_refresh=False,
         )
@@ -1516,16 +1534,20 @@ def get_dashboard_data(
 def sync_telemetry_now(
     request: Request,
     days: int = Query(default=30),
+    project: str = Query(default="ALL"),
     surface: str = Query(default="ALL"),
     model: str = Query(default="ALL"),
     provider: str = Query(default="ALL"),
     quota: str = Query(default="ALL"),
+    effort: str = Query(default="ALL"),
 ) -> dict[str, Any]:
     safe_days = validate_days(days)
+    safe_project = validate_filter(project, "project")
     safe_surface = validate_filter(surface, "surface")
     safe_model = validate_filter(model, "model")
     safe_provider = validate_filter(provider, "provider")
     safe_quota = validate_filter(quota, "quota")
+    safe_effort = validate_filter(effort, "effort")
     viewer_email = getattr(request.state, "viewer_email", "")
 
     try:
@@ -1533,10 +1555,12 @@ def sync_telemetry_now(
         _clear_cache()
         dashboard = _compute_dashboard_payload(
             days=safe_days,
+            project=safe_project,
             surface=safe_surface,
             model=safe_model,
             provider=safe_provider,
             quota=safe_quota,
+            effort=safe_effort,
             viewer_email=viewer_email,
             force_refresh=True,
         )
@@ -1563,7 +1587,7 @@ def get_user_drilldown(
 ) -> dict[str, Any]:
     safe_days = validate_days(days)
     decoded_email = validate_user_email(user_email)
-    cache_key = f"real_user_v3:{decoded_email}:{safe_days}"
+    cache_key = f"real_user_v4:{decoded_email}:{safe_days}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
@@ -1573,10 +1597,12 @@ def get_user_drilldown(
         params = [
             bigquery.ScalarQueryParameter("days", "INT64", safe_days),
             bigquery.ScalarQueryParameter("lookback_days", "INT64", safe_days + 5),
+            bigquery.ScalarQueryParameter("project", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("surface", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("model", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("provider", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("quota", "STRING", "ALL"),
+            bigquery.ScalarQueryParameter("effort", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("user_email", "STRING", decoded_email),
         ]
 

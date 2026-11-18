@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
+import { Filter } from 'lucide-react';
 import ActivityHeatmap from './ActivityHeatmap';
+import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
   formatCurrency,
@@ -14,13 +16,16 @@ export default function ChartsSection({
   modelBreakdown = [],
   effortBreakdown = [],
   surfaceBreakdown = [],
+  projectBreakdown = [],
   heatmap = [],
   timezone = 'UTC',
+  activeFilters = {},
+  onCrossFilter,
   darkMode,
   loading,
 }) {
   const [streamMode, setStreamMode] = useState('tokens'); // 'tokens' | 'finops' | 'quota'
-  const [dimTab, setDimTab] = useState('model'); // 'model' | 'effort' | 'surface'
+  const [dimTab, setDimTab] = useState('model'); // 'model' | 'project' | 'effort' | 'surface'
 
   const themeTokens = useMemo(
     () => ({
@@ -230,6 +235,7 @@ export default function ChartsSection({
                 <span style="color:#f59e0b">●</span> Overage Pay-As-You-Go Turns: <b>${formatFullNumber(pt.overage_requests)}</b> (${ovPct}%)<br/>
                 Turns &gt;200K Context: <b>${formatFullNumber(pt.long_context_turns)}</b>
               </div>
+              <div style="margin-top:5px;font-size:10px;color:#3b82f6">Click bar series to filter by quota tier</div>
             `;
           },
         },
@@ -265,6 +271,7 @@ export default function ChartsSection({
             type: 'bar',
             stack: 'quota',
             barMaxWidth: 18,
+            cursor: 'pointer',
             itemStyle: { color: '#10b981' },
             data: dailySeries.map((d) => d.regular_requests),
           },
@@ -273,6 +280,7 @@ export default function ChartsSection({
             type: 'bar',
             stack: 'quota',
             barMaxWidth: 18,
+            cursor: 'pointer',
             itemStyle: { color: '#f59e0b', borderRadius: [3, 3, 0, 0] },
             data: dailySeries.map((d) => d.overage_requests),
           },
@@ -370,11 +378,26 @@ export default function ChartsSection({
     };
   }, [streamMode, dailySeries, dates, themeTokens]);
 
+  const streamEvents = useMemo(
+    () => ({
+      click: (params) => {
+        if (streamMode !== 'quota' || !onCrossFilter) return;
+        if (params?.seriesName === 'Overage (Pay-As-You-Go)') {
+          onCrossFilter('quota', 'OVERAGE_QUOTA');
+        } else if (params?.seriesName === 'Included Subscription') {
+          onCrossFilter('quota', 'REGULAR_QUOTA');
+        }
+      },
+    }),
+    [streamMode, onCrossFilter]
+  );
+
   const activeDimRows = useMemo(() => {
+    if (dimTab === 'project') return projectBreakdown;
     if (dimTab === 'effort') return effortBreakdown;
     if (dimTab === 'surface') return surfaceBreakdown;
     return modelBreakdown;
-  }, [dimTab, modelBreakdown, effortBreakdown, surfaceBreakdown]);
+  }, [dimTab, modelBreakdown, projectBreakdown, effortBreakdown, surfaceBreakdown]);
 
   const dimTotal = useMemo(
     () =>
@@ -387,6 +410,8 @@ export default function ChartsSection({
       ),
     [activeDimRows, dimTab]
   );
+
+  const currentDimFilterValue = activeFilters[dimTab] || 'ALL';
 
   if (loading) {
     return (
@@ -408,9 +433,17 @@ export default function ChartsSection({
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
         <div className="xl:col-span-7 bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-5 shadow-sm">
           <div className="mb-3">
-            <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
-              Adoption Cadence &amp; Autonomous Turn Velocity
-            </h2>
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
+                Adoption Cadence &amp; Autonomous Turn Velocity
+              </h2>
+              <MetricTooltip
+                title="Adoption Cadence & Turn Throughput"
+                description="Overlays Daily Active Users (bars) and rolling 7-day WAU (dashed emerald line) on the left axis against autonomous agent turn volume (purple area) on the right axis."
+                formula="Stickiness = DAU ÷ 28d MAU · Velocity = Deduplicated turns / day"
+                benchmark="Parallel growth in WAU and turns per user indicates compounding engineering adoption."
+              />
+            </div>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
               Daily Active Users (DAU), rolling 7-day WAU, and real inference turn throughput across the organization
             </p>
@@ -427,23 +460,31 @@ export default function ChartsSection({
         <div className="xl:col-span-8 bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-5 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
             <div>
-              <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
-                {streamMode === 'tokens'
-                  ? 'Daily Token Anatomy Stream'
-                  : streamMode === 'finops'
-                  ? 'Daily Token Spend vs. Avoided Prompt Cache Cost ($)'
-                  : 'Daily Quota Consumption — Included vs. Overage Turns'}
-              </h2>
+              <div className="flex items-center gap-1.5">
+                <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
+                  {streamMode === 'tokens'
+                    ? 'Daily Token Anatomy Stream'
+                    : streamMode === 'finops'
+                    ? 'Daily Token Spend vs. Avoided Prompt Cache Cost ($)'
+                    : 'Daily Quota Consumption — Included vs. Overage Turns'}
+                </h2>
+                <MetricTooltip
+                  title="Multi-Lens Token & FinOps Stream"
+                  description="Switch lenses to inspect token composition (Cached, Uncached, Output, Reasoning), daily cost vs. prompt cache savings, or Included vs. Overage quota split."
+                  formula="Total Tokens = Cached + Uncached Input + Output + Reasoning"
+                  benchmark="In Quota Mix mode, click Included or Overage bars to cross-filter the entire dashboard."
+                />
+              </div>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                 {streamMode === 'tokens'
                   ? 'Cached context reuse vs. fresh prompt, code/text output, and extended reasoning tokens'
                   : streamMode === 'finops'
                   ? 'Direct comparison of actual estimated token cost against savings delivered by prompt context caching'
-                  : 'Subscription quota consumption vs. pay-as-you-go overage turns per day'}
+                  : 'Subscription quota consumption vs. pay-as-you-go overage turns per day (click series to filter)'}
               </p>
             </div>
 
-            <div className="inline-flex bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-0.5 rounded-[8px] self-start">
+            <div className="inline-flex bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-0.5 rounded-[8px] self-start shrink-0">
               {[
                 { id: 'tokens', label: 'Token Anatomy' },
                 { id: 'finops', label: 'Spend vs. Saved ($)' },
@@ -453,7 +494,7 @@ export default function ChartsSection({
                   key={m.id}
                   type="button"
                   onClick={() => setStreamMode(m.id)}
-                  className={`px-2.5 py-1 rounded-[6px] text-[11px] font-semibold transition-colors ${
+                  className={`px-2.5 py-1 rounded-[6px] text-[11px] font-semibold transition-colors whitespace-nowrap ${
                     streamMode === m.id
                       ? 'bg-white dark:bg-zinc-800 text-blue-600 dark:text-blue-400 shadow-sm'
                       : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
@@ -465,24 +506,38 @@ export default function ChartsSection({
             </div>
           </div>
 
-          <ReactECharts option={streamChartOption} style={{ height: '275px', width: '100%' }} notMerge />
+          <ReactECharts
+            option={streamChartOption}
+            onEvents={streamEvents}
+            style={{ height: '275px', width: '100%' }}
+            notMerge
+          />
         </div>
 
         <div className="xl:col-span-4 bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-5 shadow-sm flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
               <div>
-                <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
-                  Telemetry Share
-                </h2>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Proportional split by dimension
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
+                    Telemetry Share
+                  </h2>
+                  <MetricTooltip
+                    title="Interactive Dimensional Cross-Filter"
+                    description="Proportional breakdown of telemetry across Models, GCP Projects, Reasoning Effort, and Surfaces. Click any row to cross-filter the entire dashboard."
+                    benchmark="Click an active row again (or use the filter chip bar) to clear the filter."
+                  />
+                </div>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-1 mt-0.5">
+                  <Filter className="w-3 h-3 text-blue-500" />
+                  <span>Click any bar to cross-filter dashboard</span>
                 </p>
               </div>
 
               <div className="inline-flex bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-0.5 rounded-[7px]">
                 {[
                   { id: 'model', label: 'Models' },
+                  { id: 'project', label: 'Projects' },
                   { id: 'effort', label: 'Effort' },
                   { id: 'surface', label: 'Surfaces' },
                 ].map((t) => (
@@ -502,10 +557,12 @@ export default function ChartsSection({
               </div>
             </div>
 
-            <div className="space-y-3 mt-3">
+            <div className="space-y-2 mt-2">
               {activeDimRows.slice(0, 6).map((row, idx) => {
                 const metricNum = Number(dimTab === 'effort' ? row.requests || 0 : row.total_tokens || 0);
                 const sharePct = Math.min(100, Math.round((metricNum / dimTotal) * 1000) / 10);
+                const filterVal = row.key_id || row.label;
+                const isSelected = currentDimFilterValue !== 'ALL' && currentDimFilterValue === filterVal;
                 const barPalette = [
                   'bg-blue-500',
                   'bg-emerald-500',
@@ -514,8 +571,18 @@ export default function ChartsSection({
                   'bg-cyan-500',
                   'bg-pink-500',
                 ];
+
                 return (
-                  <div key={row.key_id || row.label} className="space-y-1">
+                  <button
+                    key={filterVal}
+                    type="button"
+                    onClick={() => onCrossFilter && onCrossFilter(dimTab, filterVal)}
+                    className={`w-full text-left p-2 rounded-[8px] border transition-all space-y-1 ${
+                      isSelected
+                        ? 'bg-blue-50/90 dark:bg-blue-950/35 border-blue-400 dark:border-blue-600 ring-1 ring-blue-500/30'
+                        : 'border-transparent hover:border-zinc-200 dark:hover:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-900/60'
+                    }`}
+                  >
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className={`w-2 h-2 rounded-full shrink-0 ${barPalette[idx % barPalette.length]}`} />
@@ -523,7 +590,7 @@ export default function ChartsSection({
                           {row.label}
                         </span>
                       </div>
-                      <div className="font-mono tabular-nums text-[11px] text-zinc-600 dark:text-zinc-300 shrink-0">
+                      <div className="font-mono tabular-nums text-[11px] text-zinc-600 dark:text-zinc-300 shrink-0 whitespace-nowrap">
                         {dimTab === 'effort'
                           ? `${formatFullNumber(row.requests)} turns`
                           : formatCompactNumber(row.total_tokens)}{' '}
@@ -542,13 +609,13 @@ export default function ChartsSection({
                       </span>
                       <span>{formatCurrency(row.estimated_cost_usd)}</span>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
           </div>
 
-          <div className="mt-4 pt-2.5 border-t border-zinc-100 dark:border-zinc-800/70 flex items-center justify-between text-[11px] text-zinc-500">
+          <div className="mt-3 pt-2.5 border-t border-zinc-100 dark:border-zinc-800/70 flex items-center justify-between text-[11px] text-zinc-500">
             <span>100% Real Cloud Logging attribution</span>
             <span className="font-mono">{activeDimRows.length} active items</span>
           </div>

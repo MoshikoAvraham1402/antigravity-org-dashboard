@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { Receipt, Sparkles, CreditCard, BadgePercent, Search } from 'lucide-react';
+import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
   formatCurrency,
@@ -151,9 +152,14 @@ export default function FinOpsBillingView({
       {/* 4 FinOps Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <Receipt className="w-4 h-4 text-blue-500" />
-            GCP Invoice Gross Spend
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <Receipt className="w-4 h-4 text-blue-500 shrink-0" />
+            <span className="whitespace-nowrap">GCP Invoice Gross Spend</span>
+            <MetricTooltip
+              title="GCP Cloud Billing Gross Spend"
+              description="Pre-discount invoice cost from your linked Cloud Billing BigQuery export table across Subscription Seat SKUs and Model Inference SKUs."
+              formula="SUM(cost) across AI & Gemini Enterprise SKUs"
+            />
           </div>
           <div className="mt-2 text-2xl font-extrabold font-mono tabular-nums text-zinc-950 dark:text-zinc-50">
             {formatCurrency(kpis.invoice_gross_usd)}
@@ -164,9 +170,14 @@ export default function FinOpsBillingView({
         </div>
 
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <BadgePercent className="w-4 h-4 text-emerald-500" />
-            GCP Credits &amp; Discounts
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <BadgePercent className="w-4 h-4 text-emerald-500 shrink-0" />
+            <span className="whitespace-nowrap">GCP Credits &amp; Discounts</span>
+            <MetricTooltip
+              title="Cloud Billing Credits & Discounts"
+              description="Committed-use discounts (CUDs), enterprise negotiated discounts, and promotional credits applied in Cloud Billing."
+              formula="SUM(credits.amount) from Billing Export"
+            />
           </div>
           <div className="mt-2 text-2xl font-extrabold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
             {formatCurrency(kpis.invoice_credits_usd)}
@@ -177,9 +188,14 @@ export default function FinOpsBillingView({
         </div>
 
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <CreditCard className="w-4 h-4 text-rose-500" />
-            GCP Invoice Net Billed
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <CreditCard className="w-4 h-4 text-rose-500 shrink-0" />
+            <span className="whitespace-nowrap">GCP Invoice Net Billed</span>
+            <MetricTooltip
+              title="Reconciled Net Billed Spend"
+              description="Actual net payable Cloud Billing invoice amount after subtracting all credits and discounts from gross spend."
+              formula="Net Billed = Gross Cost + Credits (negative)"
+            />
           </div>
           <div className="mt-2 text-2xl font-extrabold font-mono tabular-nums text-zinc-950 dark:text-zinc-50">
             {formatCurrency(kpis.invoice_net_usd)}
@@ -190,9 +206,16 @@ export default function FinOpsBillingView({
         </div>
 
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <Sparkles className="w-4 h-4 text-emerald-500" />
-            Prompt Cache Cost Avoided
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <Sparkles className="w-4 h-4 text-emerald-500 shrink-0" />
+            <span className="whitespace-nowrap">Prompt Cache Cost Avoided</span>
+            <MetricTooltip
+              align="right"
+              title="Prompt Cache Cost Avoidance"
+              description="Estimated input token spend saved because Antigravity reused cached trajectory context instead of re-sending uncached input tokens."
+              formula="Avoidance % = Cache Saved ÷ (Actual Spend + Cache Saved)"
+              benchmark="High cache avoidance (>55%) dramatically lowers effective cost per autonomous turn."
+            />
           </div>
           <div className="mt-2 text-2xl font-extrabold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
             {formatCurrency(kpis.cache_savings_usd)}

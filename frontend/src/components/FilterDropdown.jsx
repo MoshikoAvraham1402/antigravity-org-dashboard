@@ -24,8 +24,10 @@ export default function FilterDropdown({
 
   const selectedLabel =
     value === 'ALL'
-      ? `All ${label}s`
+      ? 'All'
       : options.find((opt) => (typeof opt === 'string' ? opt === value : opt.value === value))?.label || value;
+
+  const isActive = includeAllOption && value !== 'ALL';
 
   return (
     <div ref={containerRef} className="relative z-30">
@@ -33,10 +35,16 @@ export default function FilterDropdown({
         type="button"
         disabled={disabled}
         onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-2 bg-white dark:bg-[#0c0c0f] hover:bg-zinc-50 dark:hover:bg-zinc-800/80 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-3 py-2 text-xs font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+        className={`flex items-center gap-1.5 rounded-[8px] px-2.5 py-2 text-xs font-medium transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed border ${
+          isActive
+            ? 'bg-blue-50/80 dark:bg-blue-950/35 text-blue-900 dark:text-blue-200 border-blue-300 dark:border-blue-700'
+            : 'bg-white dark:bg-[#0c0c0f] hover:bg-zinc-50 dark:hover:bg-zinc-800/80 text-zinc-800 dark:text-zinc-200 border-zinc-200 dark:border-zinc-800'
+        }`}
       >
-        <span className="text-zinc-400 dark:text-zinc-500">{label}:</span>
-        <span className="truncate max-w-[140px] font-semibold text-zinc-950 dark:text-zinc-100">
+        <span className={isActive ? 'text-blue-600 dark:text-blue-400' : 'text-zinc-400 dark:text-zinc-500'}>
+          {label}:
+        </span>
+        <span className="truncate max-w-[130px] font-semibold text-zinc-950 dark:text-zinc-100">
           {selectedLabel}
         </span>
         <ChevronDown

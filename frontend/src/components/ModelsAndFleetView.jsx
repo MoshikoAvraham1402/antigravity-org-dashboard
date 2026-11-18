@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { Cpu, Brain, ShieldCheck, ArrowUpCircle, FolderGit2 } from 'lucide-react';
+import { Cpu, Brain, ShieldCheck, ArrowUpCircle, FolderGit2, Filter } from 'lucide-react';
+import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
   formatCurrency,
@@ -14,6 +15,8 @@ export default function ModelsAndFleetView({
   quotaBreakdown = [],
   clientVersions = [],
   projectBreakdown = [],
+  activeFilters = {},
+  onCrossFilter,
   darkMode,
   loading,
 }) {
@@ -28,8 +31,10 @@ export default function ModelsAndFleetView({
     [darkMode]
   );
 
+  const topModelsReversed = useMemo(() => [...modelBreakdown].slice(0, 8).reverse(), [modelBreakdown]);
+
   const modelStackOption = useMemo(() => {
-    const top = [...modelBreakdown].slice(0, 8).reverse();
+    const top = topModelsReversed;
     return {
       color: ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6'],
       tooltip: {
@@ -50,6 +55,7 @@ export default function ModelsAndFleetView({
               Avg Context: <b>${formatCompactNumber(m.avg_prompt_tokens)}</b> · &gt;200K: <b>${m.long_context_pct}%</b><br/>
               Spend: <b>${formatCurrency(m.estimated_cost_usd)}</b> · Saved: <b>${formatCurrency(m.cache_savings_usd)}</b>
             </div>
+            <div style="margin-top:5px;font-size:10px;color:#3b82f6">Click bar to cross-filter by model</div>
           `;
         },
       },
@@ -61,7 +67,7 @@ export default function ModelsAndFleetView({
         itemHeight: 8,
         textStyle: { color: themeTokens.axisColor, fontSize: 11 },
       },
-      grid: { left: 150, right: 24, top: 34, bottom: 24 },
+      grid: { left: 155, right: 24, top: 34, bottom: 24 },
       xAxis: {
         type: 'value',
         splitLine: { lineStyle: { color: themeTokens.gridBorder, type: 'dashed' } },
@@ -85,6 +91,7 @@ export default function ModelsAndFleetView({
           type: 'bar',
           stack: 'total',
           barMaxWidth: 18,
+          cursor: 'pointer',
           data: top.map((m) => m.cached_tokens),
         },
         {
@@ -92,6 +99,7 @@ export default function ModelsAndFleetView({
           type: 'bar',
           stack: 'total',
           barMaxWidth: 18,
+          cursor: 'pointer',
           data: top.map((m) => m.uncached_prompt_tokens),
         },
         {
@@ -99,6 +107,7 @@ export default function ModelsAndFleetView({
           type: 'bar',
           stack: 'total',
           barMaxWidth: 18,
+          cursor: 'pointer',
           data: top.map((m) => m.output_tokens),
         },
         {
@@ -106,12 +115,26 @@ export default function ModelsAndFleetView({
           type: 'bar',
           stack: 'total',
           barMaxWidth: 18,
+          cursor: 'pointer',
           itemStyle: { borderRadius: [0, 4, 4, 0] },
           data: top.map((m) => m.thinking_tokens),
         },
       ],
     };
-  }, [modelBreakdown, themeTokens]);
+  }, [topModelsReversed, themeTokens]);
+
+  const modelBarEvents = useMemo(
+    () => ({
+      click: (params) => {
+        if (!onCrossFilter) return;
+        const m = topModelsReversed[params?.dataIndex];
+        if (m?.key_id) {
+          onCrossFilter('model', m.key_id);
+        }
+      },
+    }),
+    [topModelsReversed, onCrossFilter]
+  );
 
   const effortDonutOption = useMemo(() => {
     const colorMap = {
@@ -137,6 +160,7 @@ export default function ModelsAndFleetView({
               Reasoning Tokens: <b>${formatCompactNumber(d.thinking_tokens)}</b><br/>
               Total Spend: <b>${formatCurrency(d.estimated_cost_usd)}</b>
             </div>
+            <div style="margin-top:4px;font-size:10px;color:#8b5cf6">Click slice to cross-filter by effort</div>
           `;
         },
       },
@@ -145,6 +169,7 @@ export default function ModelsAndFleetView({
           type: 'pie',
           radius: ['54%', '80%'],
           center: ['50%', '50%'],
+          cursor: 'pointer',
           itemStyle: {
             borderRadius: 6,
             borderColor: darkMode ? '#0c0c0f' : '#ffffff',
@@ -161,6 +186,18 @@ export default function ModelsAndFleetView({
       ],
     };
   }, [effortBreakdown, darkMode, themeTokens]);
+
+  const effortDonutEvents = useMemo(
+    () => ({
+      click: (params) => {
+        const keyId = params?.data?.raw?.key_id;
+        if (onCrossFilter && keyId) {
+          onCrossFilter('effort', keyId);
+        }
+      },
+    }),
+    [onCrossFilter]
+  );
 
   if (loading) {
     return <div className="h-[520px] bg-white dark:bg-[#0c0c0f] border border-zinc-200 dark:border-zinc-800 rounded-[12px] animate-pulse" />;
@@ -185,11 +222,22 @@ export default function ModelsAndFleetView({
             <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
               Foundation Model Token Anatomy
             </h2>
+            <MetricTooltip
+              title="Model-Level Token Composition"
+              description="Breaks down every foundation model's token volume into Cached Context, Uncached Prompt Input, Generated Output, and Extended Reasoning tokens."
+              benchmark="Click any model bar to isolate that model across all KPIs, daily charts, and engineers."
+            />
           </div>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
-            Comparison of cached context reuse, fresh prompt input, output generation, and reasoning tokens across active models
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3 flex items-center gap-1.5">
+            <Filter className="w-3 h-3 text-blue-500 shrink-0" />
+            <span>Click any model bar to cross-filter · Cached reuse vs. fresh prompt, output, and reasoning tokens</span>
           </p>
-          <ReactECharts option={modelStackOption} style={{ height: '270px', width: '100%' }} notMerge />
+          <ReactECharts
+            option={modelStackOption}
+            onEvents={modelBarEvents}
+            style={{ height: '270px', width: '100%' }}
+            notMerge
+          />
         </div>
 
         <div className="xl:col-span-5 bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-5 shadow-sm flex flex-col justify-between">
@@ -199,18 +247,29 @@ export default function ModelsAndFleetView({
               <h2 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
                 Reasoning Effort &amp; Quota Tiers
               </h2>
+              <MetricTooltip
+                title="Reasoning Effort & Quota Attribution"
+                description="Maps agent experience effort levels (Lite, Medium, High, Max) alongside Included Subscription vs. Pay-As-You-Go Overage quota consumption."
+                benchmark="Click any effort tier or quota card below to cross-filter the dashboard."
+              />
             </div>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Agent reasoning effort levels (<code className="font-mono">experience</code> telemetry) and subscription vs. overage split
+              Click any effort level or quota card to isolate reasoning &amp; billing behavior
             </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-center my-2">
             <div className="sm:col-span-5">
-              <ReactECharts option={effortDonutOption} style={{ height: '175px', width: '100%' }} notMerge />
+              <ReactECharts
+                option={effortDonutOption}
+                onEvents={effortDonutEvents}
+                style={{ height: '175px', width: '100%' }}
+                notMerge
+              />
             </div>
             <div className="sm:col-span-7 space-y-2">
               {effortBreakdown.map((e) => {
+                const isSelected = activeFilters.effort === e.key_id;
                 const badgeColor =
                   e.label === 'Max Effort'
                     ? 'bg-rose-500'
@@ -220,18 +279,24 @@ export default function ModelsAndFleetView({
                     ? 'bg-blue-500'
                     : 'bg-emerald-500';
                 return (
-                  <div
+                  <button
                     key={e.key_id}
-                    className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-lg bg-zinc-50 dark:bg-zinc-900/70 border border-zinc-200/70 dark:border-zinc-800"
+                    type="button"
+                    onClick={() => onCrossFilter && onCrossFilter('effort', e.key_id)}
+                    className={`w-full flex items-center justify-between text-xs px-2.5 py-1.5 rounded-lg border transition-all ${
+                      isSelected
+                        ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-400 dark:border-violet-600 ring-1 ring-violet-500/30'
+                        : 'bg-zinc-50 dark:bg-zinc-900/70 border-zinc-200/70 dark:border-zinc-800 hover:border-violet-300 dark:hover:border-violet-700'
+                    }`}
                   >
                     <div className="flex items-center gap-2">
                       <span className={`w-2.5 h-2.5 rounded-full ${badgeColor}`} />
                       <span className="font-semibold text-zinc-800 dark:text-zinc-200">{e.label}</span>
                     </div>
-                    <div className="font-mono tabular-nums text-[11px] text-zinc-600 dark:text-zinc-300">
+                    <div className="font-mono tabular-nums text-[11px] text-zinc-600 dark:text-zinc-300 whitespace-nowrap">
                       {formatFullNumber(e.requests)} turns · {formatCurrency(e.estimated_cost_usd)}
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -240,13 +305,20 @@ export default function ModelsAndFleetView({
           <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800/80 grid grid-cols-2 gap-2.5">
             {quotaBreakdown.map((q) => {
               const isOverage = q.key_id === 'OVERAGE_QUOTA';
+              const isSelected = activeFilters.quota === q.key_id;
               return (
-                <div
+                <button
                   key={q.key_id}
-                  className={`p-2.5 rounded-lg border ${
-                    isOverage
-                      ? 'bg-amber-50/60 border-amber-200/80 dark:bg-amber-950/20 dark:border-amber-900/50'
-                      : 'bg-emerald-50/60 border-emerald-200/80 dark:bg-emerald-950/20 dark:border-emerald-900/50'
+                  type="button"
+                  onClick={() => onCrossFilter && onCrossFilter('quota', q.key_id)}
+                  className={`text-left p-2.5 rounded-lg border transition-all ${
+                    isSelected
+                      ? isOverage
+                        ? 'bg-amber-100/80 border-amber-500 ring-1 ring-amber-500/40 dark:bg-amber-950/50'
+                        : 'bg-emerald-100/80 border-emerald-500 ring-1 ring-emerald-500/40 dark:bg-emerald-950/50'
+                      : isOverage
+                      ? 'bg-amber-50/60 border-amber-200/80 hover:border-amber-400 dark:bg-amber-950/20 dark:border-amber-900/50'
+                      : 'bg-emerald-50/60 border-emerald-200/80 hover:border-emerald-400 dark:bg-emerald-950/20 dark:border-emerald-900/50'
                   }`}
                 >
                   <div className="text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
@@ -258,7 +330,7 @@ export default function ModelsAndFleetView({
                   <div className="text-[11px] font-mono text-zinc-600 dark:text-zinc-400">
                     {formatCompactNumber(q.total_tokens)} tok · {formatCurrency(q.estimated_cost_usd)}
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -267,13 +339,15 @@ export default function ModelsAndFleetView({
 
       {/* Model Efficiency Matrix Table */}
       <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
-          <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
-            Model Efficiency, Context Window &amp; FinOps Matrix
-          </h3>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Granular performance &amp; unit-economics per foundation model across your GCP organization
-          </p>
+        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
+              Model Efficiency, Context Window &amp; FinOps Matrix
+            </h3>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Click any model row to cross-filter · Hover <code className="font-mono">(?)</code> headers for metric formulas
+            </p>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -283,66 +357,132 @@ export default function ModelsAndFleetView({
                 <th className="py-3 px-3">Provider</th>
                 <th className="py-3 px-3 text-right">Turns</th>
                 <th className="py-3 px-3 text-right">Users</th>
-                <th className="py-3 px-3 text-right">Avg Prompt Ctx</th>
-                <th className="py-3 px-3 text-right">&gt;200K Tier</th>
-                <th className="py-3 px-3 text-right">Cache Hit</th>
-                <th className="py-3 px-3 text-right">Overage %</th>
+                <th className="py-3 px-3 text-right">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    Avg Prompt Ctx
+                    <MetricTooltip
+                      title="Average Prompt Context"
+                      description="Mean total prompt tokens (cached + uncached) sent per turn to this model."
+                      formula="SUM(prompt_tokens) ÷ COUNT(turns)"
+                    />
+                  </span>
+                </th>
+                <th className="py-3 px-3 text-right">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    &gt;200K Tier
+                    <MetricTooltip
+                      title="Long-Context (>200K) Turn Share"
+                      description="Percentage of turns exceeding 200,000 prompt tokens, where long-context SKU multipliers apply."
+                      formula="COUNTIF(prompt_tokens > 200K) ÷ Turns × 100"
+                      benchmark=">20% highlights models used on deep uncompacted trajectories."
+                    />
+                  </span>
+                </th>
+                <th className="py-3 px-3 text-right">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    Cache Hit
+                    <MetricTooltip
+                      title="Model Prompt Cache Hit Rate"
+                      description="Percentage of input prompt tokens served from context cache for this model."
+                      formula="SUM(cached_tokens) ÷ SUM(prompt_tokens) × 100"
+                      benchmark="≥80% indicates healthy multi-turn context reuse."
+                    />
+                  </span>
+                </th>
+                <th className="py-3 px-3 text-right">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    Overage %
+                    <MetricTooltip
+                      title="Overage Quota Turn Share"
+                      description="Percentage of turns on this model billed via OVERAGE_QUOTA beyond included subscription capacity."
+                      formula="COUNTIF(quota = OVERAGE_QUOTA) ÷ Turns × 100"
+                    />
+                  </span>
+                </th>
                 <th className="py-3 px-3 text-right">Total Tokens</th>
-                <th className="py-3 px-3 text-right">Cache Saved</th>
+                <th className="py-3 px-3 text-right">
+                  <span className="inline-flex items-center justify-end gap-1">
+                    Cache Saved
+                    <MetricTooltip
+                      align="right"
+                      title="Prompt Cache Cost Avoided"
+                      description="Dollar spend avoided by serving cached prompt tokens at discounted cache SKU rates instead of full list input rates."
+                      formula="Cached Tokens × (List Input Rate − Cached Rate)"
+                    />
+                  </span>
+                </th>
                 <th className="py-3 px-4 text-right">Token Spend</th>
               </tr>
             </thead>
             <tbody className="text-xs divide-y divide-zinc-100 dark:divide-zinc-800/80 font-mono tabular-nums">
-              {modelBreakdown.map((m) => (
-                <tr key={m.key_id} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50 transition-colors">
-                  <td className="py-3 px-4 font-sans font-semibold text-zinc-950 dark:text-zinc-100">
-                    <div>{m.label}</div>
-                    <div className="text-[10.5px] font-mono text-zinc-400 font-normal">{m.key_id}</div>
-                  </td>
-                  <td className="py-3 px-3 font-sans">
-                    <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300">
-                      {m.provider}
-                    </span>
-                  </td>
-                  <td className="py-3 px-3 text-right">{formatFullNumber(m.requests)}</td>
-                  <td className="py-3 px-3 text-right">{m.active_users}</td>
-                  <td className="py-3 px-3 text-right">{formatCompactNumber(m.avg_prompt_tokens)}</td>
-                  <td className="py-3 px-3 text-right">
-                    <span
-                      className={
-                        Number(m.long_context_pct) > 20
-                          ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                          : 'text-zinc-500'
-                      }
-                    >
-                      {m.long_context_pct}%
-                    </span>
-                  </td>
-                  <td className="py-3 px-3 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
-                    {m.cache_hit_rate_pct}%
-                  </td>
-                  <td className="py-3 px-3 text-right">
-                    <span
-                      className={
-                        Number(m.overage_share_pct) > 50
-                          ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                          : 'text-zinc-500'
-                      }
-                    >
-                      {m.overage_share_pct}%
-                    </span>
-                  </td>
-                  <td className="py-3 px-3 text-right font-semibold text-zinc-950 dark:text-zinc-100">
-                    {formatCompactNumber(m.total_tokens)}
-                  </td>
-                  <td className="py-3 px-3 text-right text-emerald-600 dark:text-emerald-400">
-                    {formatCurrency(m.cache_savings_usd)}
-                  </td>
-                  <td className="py-3 px-4 text-right font-bold text-zinc-950 dark:text-zinc-50">
-                    {formatCurrency(m.estimated_cost_usd)}
-                  </td>
-                </tr>
-              ))}
+              {modelBreakdown.map((m) => {
+                const isSelected = activeFilters.model === m.key_id;
+                return (
+                  <tr
+                    key={m.key_id}
+                    onClick={() => onCrossFilter && onCrossFilter('model', m.key_id)}
+                    className={`cursor-pointer transition-colors ${
+                      isSelected
+                        ? 'bg-blue-50/90 dark:bg-blue-950/40'
+                        : 'hover:bg-zinc-50 dark:hover:bg-zinc-900/50'
+                    }`}
+                  >
+                    <td className="py-3 px-4 font-sans font-semibold text-zinc-950 dark:text-zinc-100">
+                      <div>{m.label}</div>
+                      <div className="text-[10.5px] font-mono text-zinc-400 font-normal">{m.key_id}</div>
+                    </td>
+                    <td className="py-3 px-3 font-sans">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onCrossFilter && m.provider) onCrossFilter('provider', m.provider);
+                        }}
+                        className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+                      >
+                        {m.provider}
+                      </button>
+                    </td>
+                    <td className="py-3 px-3 text-right">{formatFullNumber(m.requests)}</td>
+                    <td className="py-3 px-3 text-right">{m.active_users}</td>
+                    <td className="py-3 px-3 text-right">{formatCompactNumber(m.avg_prompt_tokens)}</td>
+                    <td className="py-3 px-3 text-right">
+                      <span
+                        className={
+                          Number(m.long_context_pct) > 20
+                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                            : 'text-zinc-500'
+                        }
+                      >
+                        {m.long_context_pct}%
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
+                      {m.cache_hit_rate_pct}%
+                    </td>
+                    <td className="py-3 px-3 text-right">
+                      <span
+                        className={
+                          Number(m.overage_share_pct) > 50
+                            ? 'text-amber-600 dark:text-amber-400 font-semibold'
+                            : 'text-zinc-500'
+                        }
+                      >
+                        {m.overage_share_pct}%
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-right font-semibold text-zinc-950 dark:text-zinc-100">
+                      {formatCompactNumber(m.total_tokens)}
+                    </td>
+                    <td className="py-3 px-3 text-right text-emerald-600 dark:text-emerald-400">
+                      {formatCurrency(m.cache_savings_usd)}
+                    </td>
+                    <td className="py-3 px-4 text-right font-bold text-zinc-950 dark:text-zinc-50">
+                      {formatCurrency(m.estimated_cost_usd)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -356,6 +496,11 @@ export default function ModelsAndFleetView({
               <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50 flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-500" />
                 Client Version Fleet Hygiene
+                <MetricTooltip
+                  title="Antigravity Client Version Hygiene"
+                  description="Distribution of inference turns by client_version reported in Cloud Logging labels across IDE and CLI binaries."
+                  benchmark="Aim for ≥85% of turns on the latest release to ensure optimal prompt caching and security patches."
+                />
               </h3>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 Tracks Antigravity binary adoption so engineers benefit from latest security &amp; caching improvements
@@ -406,19 +551,31 @@ export default function ModelsAndFleetView({
             <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50 flex items-center gap-2">
               <FolderGit2 className="w-4 h-4 text-blue-500" />
               GCP Project Attribution Across Organization
+              <MetricTooltip
+                title="Multi-Project Attribution & Filter"
+                description="Resolves Cloud Logging resource_container project numbers to human-readable GCP project IDs across your organization. Click any project card to filter the entire dashboard."
+              />
             </h3>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Real telemetry routed from child GCP projects via Organization Cloud Logging sink
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 flex items-center gap-1">
+              <Filter className="w-3 h-3 text-blue-500 shrink-0" />
+              <span>Click any GCP project below to isolate team usage &amp; spend</span>
             </p>
           </div>
 
           <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
             {projectBreakdown.map((proj) => {
               const pct = Math.max(1, Math.round((Number(proj.total_tokens || 0) / totalProjectTokens) * 1000) / 10);
+              const isSelected = activeFilters.project === proj.key_id;
               return (
-                <div
+                <button
                   key={proj.key_id}
-                  className="p-2.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/50"
+                  type="button"
+                  onClick={() => onCrossFilter && onCrossFilter('project', proj.key_id)}
+                  className={`w-full text-left p-2.5 rounded-lg border transition-all ${
+                    isSelected
+                      ? 'bg-blue-50/90 dark:bg-blue-950/40 border-blue-500 ring-1 ring-blue-500/30'
+                      : 'border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/50 hover:border-blue-400 dark:hover:border-blue-700'
+                  }`}
                 >
                   <div className="flex items-center justify-between text-xs mb-1.5">
                     <span className="font-mono font-bold text-zinc-900 dark:text-zinc-100">{proj.label}</span>
@@ -438,7 +595,7 @@ export default function ModelsAndFleetView({
                     </span>
                     <span>Cache {proj.cache_hit_rate_pct}%</span>
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>

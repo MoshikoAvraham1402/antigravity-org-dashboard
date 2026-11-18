@@ -1,5 +1,6 @@
 import React from 'react';
 import { GitBranch, Gauge, Wrench, Clock } from 'lucide-react';
+import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
   formatCurrency,
@@ -23,9 +24,15 @@ export default function TrajectoriesView({
       {/* Quantiles & Agentic Depth Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <GitBranch className="w-4 h-4 text-violet-500" />
-            Autonomous Session Depth Quantiles
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <GitBranch className="w-4 h-4 text-violet-500 shrink-0" />
+            <span>Autonomous Session Depth Quantiles</span>
+            <MetricTooltip
+              title="Trajectory Depth Quantiles"
+              description="Measures how many sequential model inference turns Antigravity executes per unique trajectory_id session."
+              formula="APPROX_QUANTILES(turns_per_trajectory, 100)"
+              benchmark="Deep P90 (>40 turns) reflects complex multi-file feature implementation & autonomous testing."
+            />
           </div>
           <div className="mt-3 grid grid-cols-3 gap-2 font-mono tabular-nums">
             <div className="p-2 rounded-lg bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/70 dark:border-zinc-800">
@@ -53,9 +60,14 @@ export default function TrajectoriesView({
         </div>
 
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <Gauge className="w-4 h-4 text-amber-500" />
-            Prompt Context Window Distribution
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <Gauge className="w-4 h-4 text-amber-500 shrink-0" />
+            <span>Prompt Context Window Distribution</span>
+            <MetricTooltip
+              title="Prompt Context Window Quantiles"
+              description="Distribution of input prompt token counts per turn across median (P50), 95th-percentile tail (P95), and >200K long-context turns."
+              benchmark="High P95 (>180K) indicates heavy repository context; use /compact to trim stale context."
+            />
           </div>
           <div className="mt-3 grid grid-cols-3 gap-2 font-mono tabular-nums">
             <div className="p-2 rounded-lg bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/70 dark:border-zinc-800">
@@ -83,9 +95,15 @@ export default function TrajectoriesView({
         </div>
 
         <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] p-4 shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            <Wrench className="w-4 h-4 text-emerald-500" />
-            Agentic Tool &amp; Action Density
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+            <Wrench className="w-4 h-4 text-emerald-500 shrink-0" />
+            <span>Agentic Tool &amp; Action Density</span>
+            <MetricTooltip
+              align="right"
+              title="Agentic Tool Execution Density"
+              description="Derived from ClientTelemetryLog InferenceResolved events, measuring file reads/edits, terminal commands, and MCP tool invocations per turn."
+              formula="Tool Turns % = COUNTIF(tool_calls > 0) ÷ Total Turns"
+            />
           </div>
           <div className="mt-3 grid grid-cols-3 gap-2 font-mono tabular-nums">
             <div className="p-2 rounded-lg bg-zinc-50 dark:bg-zinc-900/80 border border-zinc-200/70 dark:border-zinc-800">

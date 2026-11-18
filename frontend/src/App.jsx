@@ -16,6 +16,8 @@ import {
   Receipt,
   GitBranch,
   RotateCcw,
+  Filter,
+  X,
 } from 'lucide-react';
 import FilterDropdown from './components/FilterDropdown';
 import KpiCards from './components/KpiCards';
@@ -54,10 +56,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
 
   const [days, setDays] = useState(30);
+  const [project, setProject] = useState('ALL');
   const [surface, setSurface] = useState('ALL');
   const [model, setModel] = useState('ALL');
   const [provider, setProvider] = useState('ALL');
   const [quota, setQuota] = useState('ALL');
+  const [effort, setEffort] = useState('ALL');
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -95,10 +99,12 @@ export default function App() {
       const res = await apiClient.get('/api/dashboard', {
         params: {
           days,
+          project,
           surface,
           model,
           provider,
           quota,
+          effort,
         },
       });
       setData(res.data);
@@ -116,7 +122,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [days, surface, model, provider, quota]);
+  }, [days, project, surface, model, provider, quota, effort]);
 
   useEffect(() => {
     fetchDashboard();
@@ -129,10 +135,12 @@ export default function App() {
       const res = await apiClient.post('/api/sync', null, {
         params: {
           days,
+          project,
           surface,
           model,
           provider,
           quota,
+          effort,
         },
       });
       const syncedPayload = res.data?.dashboard;
@@ -172,7 +180,7 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
-  }, [days, surface, model, provider, quota, selectedUserEmail]);
+  }, [days, project, surface, model, provider, quota, effort, selectedUserEmail]);
 
   useEffect(() => {
     if (!selectedUserEmail) {
@@ -205,22 +213,73 @@ export default function App() {
     [data, selectedUserEmail]
   );
 
-  const hasActiveFilters = surface !== 'ALL' || model !== 'ALL' || provider !== 'ALL' || quota !== 'ALL';
+  const meta = data?.meta;
 
-  const resetAllFilters = () => {
+  const activeFilters = useMemo(
+    () => ({ project, surface, model, provider, quota, effort }),
+    [project, surface, model, provider, quota, effort]
+  );
+
+  const handleCrossFilter = useCallback((dim, val) => {
+    if (!val) return;
+    if (dim === 'project') setProject((prev) => (prev === val ? 'ALL' : val));
+    else if (dim === 'surface') setSurface((prev) => (prev === val ? 'ALL' : val));
+    else if (dim === 'model') setModel((prev) => (prev === val ? 'ALL' : val));
+    else if (dim === 'provider') setProvider((prev) => (prev === val ? 'ALL' : val));
+    else if (dim === 'quota') setQuota((prev) => (prev === val ? 'ALL' : val));
+    else if (dim === 'effort') setEffort((prev) => (prev === val ? 'ALL' : val));
+  }, []);
+
+  const hasActiveFilters =
+    project !== 'ALL' ||
+    surface !== 'ALL' ||
+    model !== 'ALL' ||
+    provider !== 'ALL' ||
+    quota !== 'ALL' ||
+    effort !== 'ALL';
+
+  const resetAllFilters = useCallback(() => {
+    setProject('ALL');
     setSurface('ALL');
     setModel('ALL');
     setProvider('ALL');
     setQuota('ALL');
-  };
+    setEffort('ALL');
+  }, []);
 
-  const meta = data?.meta;
+  const activeFilterChips = useMemo(() => {
+    const chips = [];
+    if (project !== 'ALL') {
+      chips.push({ key: 'project', dimLabel: 'Project', display: project, onClear: () => setProject('ALL') });
+    }
+    if (surface !== 'ALL') {
+      chips.push({ key: 'surface', dimLabel: 'Surface', display: surface, onClear: () => setSurface('ALL') });
+    }
+    if (model !== 'ALL') {
+      const mLabel =
+        (meta?.available_models || []).find((m) => (typeof m === 'string' ? m === model : m.value === model))?.label ||
+        model;
+      chips.push({ key: 'model', dimLabel: 'Model', display: mLabel, onClear: () => setModel('ALL') });
+    }
+    if (provider !== 'ALL') {
+      chips.push({ key: 'provider', dimLabel: 'Provider', display: provider, onClear: () => setProvider('ALL') });
+    }
+    if (quota !== 'ALL') {
+      const qLabel =
+        (meta?.available_quotas || []).find((q) => q.value === quota)?.label || quota;
+      chips.push({ key: 'quota', dimLabel: 'Quota', display: qLabel, onClear: () => setQuota('ALL') });
+    }
+    if (effort !== 'ALL') {
+      chips.push({ key: 'effort', dimLabel: 'Effort', display: effort, onClear: () => setEffort('ALL') });
+    }
+    return chips;
+  }, [project, surface, model, provider, quota, effort, meta]);
 
   return (
     <div className="min-h-screen bg-[#fafafa] dark:bg-[#09090b] text-zinc-950 dark:text-zinc-50 transition-colors duration-200">
       {/* Sticky Executive Command Bar */}
       <header className="sticky top-0 z-40 backdrop-blur-md bg-white/85 dark:bg-[#09090b]/85 border-b border-zinc-200/90 dark:border-zinc-800/90">
-        <div className="max-w-[1640px] mx-auto px-4 sm:px-6 py-3.5 flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3.5">
+        <div className="max-w-[1640px] mx-auto px-4 sm:px-6 py-3.5 flex flex-col 2xl:flex-row 2xl:items-center justify-between gap-3">
           <div className="flex items-start sm:items-center gap-3">
             <div className="p-2.5 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-sm shrink-0">
               <Activity className="w-5 h-5" />
@@ -315,6 +374,14 @@ export default function App() {
             </div>
 
             <FilterDropdown
+              label="Project"
+              value={project}
+              options={meta?.available_projects || []}
+              onChange={setProject}
+              disabled={loading || syncing}
+            />
+
+            <FilterDropdown
               label="Surface"
               value={surface}
               options={meta?.available_surfaces || []}
@@ -390,11 +457,46 @@ export default function App() {
           </div>
         )}
 
-        {/* 6-Card Executive KPI Strip */}
+        {/* Active Cross-Filter Pill Ribbon */}
+        {activeFilterChips.length > 0 && (
+          <div className="bg-blue-50/75 dark:bg-blue-950/25 border border-blue-200/80 dark:border-blue-800/60 rounded-[10px] px-3.5 py-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300">
+                <Filter className="w-3.5 h-3.5" />
+                Active Cross-Filters:
+              </span>
+              {activeFilterChips.map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={chip.onClear}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border border-blue-200 dark:border-blue-800 hover:border-rose-400 dark:hover:border-rose-500 transition-colors shadow-sm"
+                >
+                  <span className="text-zinc-400 dark:text-zinc-500">{chip.dimLabel}:</span>
+                  <span className="font-mono font-semibold">{chip.display}</span>
+                  <X className="w-3 h-3 text-zinc-400 hover:text-rose-500" />
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={resetAllFilters}
+              className="text-xs font-semibold text-blue-700 dark:text-blue-400 hover:underline"
+            >
+              Clear all filters
+            </button>
+          </div>
+        )}
+
+        {/* Two-Tier Executive KPI Strip (Zero Truncation + Tooltips + Quick Filters) */}
         <KpiCards
           kpis={data?.kpis}
           dailySeries={data?.daily_series || []}
+          effortBreakdown={data?.effort_breakdown || []}
           days={days}
+          activeQuota={quota}
+          onToggleQuota={setQuota}
+          onJumpTab={setActiveTab}
           loading={loading}
         />
 
@@ -455,7 +557,7 @@ export default function App() {
           </nav>
 
           <div className="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 hidden md:block">
-            100% Real GCP Telemetry · Zero Synthetic Data
+            100% Real GCP Telemetry · Click Charts to Cross-Filter · Hover (?) for Formulas
           </div>
         </div>
 
@@ -467,8 +569,11 @@ export default function App() {
               modelBreakdown={data?.model_breakdown || []}
               effortBreakdown={data?.effort_breakdown || []}
               surfaceBreakdown={data?.surface_breakdown || []}
+              projectBreakdown={data?.project_breakdown || []}
               heatmap={data?.activity_heatmap || []}
               timezone={meta?.org_timezone || 'UTC'}
+              activeFilters={activeFilters}
+              onCrossFilter={handleCrossFilter}
               darkMode={darkMode}
               loading={loading}
             />
@@ -483,6 +588,7 @@ export default function App() {
                   users={data?.users || []}
                   selectedUserEmail={selectedUserEmail}
                   onSelectUser={setSelectedUserEmail}
+                  onCrossFilter={handleCrossFilter}
                   loading={loading}
                 />
               </div>
@@ -509,6 +615,8 @@ export default function App() {
             quotaBreakdown={data?.quota_breakdown || []}
             clientVersions={data?.client_version_breakdown || []}
             projectBreakdown={data?.project_breakdown || []}
+            activeFilters={activeFilters}
+            onCrossFilter={handleCrossFilter}
             darkMode={darkMode}
             loading={loading}
           />
@@ -544,6 +652,7 @@ export default function App() {
                   users={data?.users || []}
                   selectedUserEmail={selectedUserEmail}
                   onSelectUser={setSelectedUserEmail}
+                  onCrossFilter={handleCrossFilter}
                   loading={loading}
                 />
               </div>
