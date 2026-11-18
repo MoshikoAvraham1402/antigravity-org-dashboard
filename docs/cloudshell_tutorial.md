@@ -95,3 +95,5 @@ gcloud run services describe antigravity-usage-dashboard \
 <walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
 
 Your **Antigravity Organization Intelligence & FinOps Dashboard** is now live! Click the Cloud Run URL above to explore Executive Overview, Models & Fleet Hygiene, FinOps & Cloud Billing, and Engineer Trajectories.
+
+> **FinOps Tip:** All dashboard resources and BigQuery queries are automatically labeled `datacloud=antigravity` (typical serverless TCO is `$0–$2.80/mo` for up to 250 engineers). Open `docs/COST_ESTIMATION.md` for full sizing tables and SQL self-audit queries.

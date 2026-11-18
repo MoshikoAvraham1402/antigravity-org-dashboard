@@ -178,3 +178,9 @@ gcloud logging sinks delete antigravity-org-bq-sink --organization=YOUR_GCP_ORG_
 bq rm -r -f -d YOUR_HOST_PROJECT_ID:antigravity_monitoring
 bq rm -r -f -d YOUR_HOST_PROJECT_ID:antigravity_raw_logs
 ```
+
+---
+
+## 8. Tracking Dashboard Hosting Costs
+
+All resources and BigQuery queries created by this installer carry the GCP billing label **`datacloud=antigravity`**. Filter **Cloud Billing → Reports** by `datacloud = antigravity` or see [`COST_ESTIMATION.md`](COST_ESTIMATION.md) for TCO estimates (`$0–$15/mo` for up to 1,000 engineers) and copy-paste `INFORMATION_SCHEMA` audit queries.

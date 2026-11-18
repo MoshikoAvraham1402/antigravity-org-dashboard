@@ -159,6 +159,9 @@ def patch_cloud_run_service(
     svc_body["invokerIamDisabled"] = is_public
     svc_body["iapEnabled"] = not is_public
     svc_body["scaling"] = {"maxInstanceCount": max_instances}
+    labels = svc_body.setdefault("labels", {})
+    labels.setdefault("datacloud", "antigravity")
+    labels.setdefault("app", "antigravity-dashboard")
 
     template = svc_body.setdefault("template", {})
     template["serviceAccount"] = sa_email
@@ -187,7 +190,7 @@ def patch_cloud_run_service(
     ):
         svc_body.pop(ro_key, None)
 
-    update_mask = "invokerIamDisabled,iapEnabled,scaling.maxInstanceCount,template"
+    update_mask = "invokerIamDisabled,iapEnabled,labels,scaling.maxInstanceCount,template"
     r_patch = requests.patch(
         f"{svc_url}?updateMask={update_mask}",
         headers=headers,

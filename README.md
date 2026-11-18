@@ -3,6 +3,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform: Google Cloud Run](https://img.shields.io/badge/Google%20Cloud-Cloud%20Run%20%2B%20BigQuery-4285F4?logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
 [![Security: Zero-Trust IAP Ready](https://img.shields.io/badge/Security-IAP%20Zero--Trust%20%7C%20Non--Root-10B981)](#security--privacy-by-design)
+[![Estimated Hosting TCO](https://img.shields.io/badge/Hosting%20TCO-%240--%2415%2Fmo%20Serverless-0EA5E9)](#estimated-infrastructure-cost-tco--self-monitoring)
 
 [![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://ssh.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https%3A%2F%2Fgithub.com%2FMoshikoAvraham1402%2Fantigravity-org-dashboard.git&cloudshell_tutorial=docs%2Fcloudshell_tutorial.md)
 
@@ -218,9 +219,28 @@ Changes take effect immediately on the next dashboard refresh without redeployin
 
 ---
 
+## Estimated Infrastructure Cost (TCO) & Self-Monitoring
+
+Because the entire stack is **100% serverless and scale-to-zero** (`minInstances=0` on Cloud Run, **Direct Cloud Run IAP** with zero Load Balancer fixed fees, `$0` Cloud Logging sink routing fees, and day-partitioned BigQuery tables with a `30s` response cache + `150 MB` scan cap), hosting the dashboard itself costs **pennies to a few dollars per month**:
+
+| Organization Size | Active Antigravity Engineers | Dashboard Refreshes / Mo | Net Monthly Cost *(With GCP Free Tier)* | Gross List Cost *(Shared Enterprise Billing Account)* |
+| :--- | :---: | :---: | :---: | :---: |
+| **Starter / Team** | 1 – 25 | ~300 | **\$0.00 / mo** | **~\$0.15 – \$0.40 / mo** |
+| **Growth / Mid-Market** | 25 – 250 | ~1,200 | **\$0.00 – \$0.25 / mo** | **~\$1.20 – \$2.80 / mo** |
+| **Enterprise** | 250 – 1,000 | ~3,500 | **~\$2.50 – \$5.50 / mo** | **~\$6.50 – \$14.50 / mo** |
+| **Global Scale** | 1,000 – 5,000 | ~10,000 | **~\$15.00 – \$38.00 / mo** | **~\$25.00 – \$55.00 / mo** |
+
+### How to Check Your Exact Dashboard Cost in GCP
+Every resource and BigQuery SQL job provisioned by `install.sh` and `terraform/` is automatically stamped with the unified billing label **`datacloud=antigravity`**:
+1. **Cloud Billing Console (No Code):** Open **Google Cloud Console → Billing → Reports**, filter by label **`datacloud = antigravity`**, and group by **SKU** or **Service** to see exact daily/monthly net costs.
+2. **Instant SQL Self-Audit (`INFORMATION_SCHEMA`):** Run the copy-paste BigQuery query & storage cost audit queries in [**`docs/COST_ESTIMATION.md`**](docs/COST_ESTIMATION.md) to inspect exact bytes billed and storage GiB on Day 1 (even without a Billing Export table).
+
+---
+
 ## Documentation
 
 - [**Interactive Cloud Shell Tutorial (`docs/cloudshell_tutorial.md`)**](docs/cloudshell_tutorial.md) — Guided browser-based deployment walkthrough for Google Cloud Shell.
+- [**Infrastructure Cost Estimation & Self-Monitoring Guide (`docs/COST_ESTIMATION.md`)**](docs/COST_ESTIMATION.md) — Detailed monthly TCO sizing by org tier, component pricing breakdown, budget alerts, and copy-paste SQL self-audit queries.
 - [**Enterprise Installation & Upgrade Guide (`docs/INSTALLATION.md`)**](docs/INSTALLATION.md) — Detailed setup for Org/Folder/Project sinks, IAP Zero-Trust access, Cloud Billing linking, and cross-project `Sync Data` IAM.
 - [**Architecture & Security Whitepaper (`docs/ARCHITECTURE_AND_SECURITY.md`)**](docs/ARCHITECTURE_AND_SECURITY.md) — Telemetry log schemas (`InferenceResponseLog` & `ClientTelemetryLog`), deduplication design, and defense-in-depth controls.
 - [**Troubleshooting Guide (`docs/TROUBLESHOOTING.md`)**](docs/TROUBLESHOOTING.md) — Solutions for GCP Org Policies (`iam.allowedPolicyMemberDomains`), BigQuery dataset regions, Day-0 sink creation, and IAP permissions.
