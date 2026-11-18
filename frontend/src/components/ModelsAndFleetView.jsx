@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { Cpu, Brain, ShieldCheck, ArrowUpCircle, FolderGit2, Filter } from 'lucide-react';
+import { Cpu, Brain, ShieldCheck, ArrowUpCircle, FolderGit2, Filter, Download } from 'lucide-react';
 import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
@@ -8,6 +8,7 @@ import {
   formatFullNumber,
   CHART_COLORS,
 } from '../utils/formatters';
+import { downloadCsv } from '../utils/csv';
 
 export default function ModelsAndFleetView({
   modelBreakdown = [],
@@ -348,6 +349,34 @@ export default function ModelsAndFleetView({
               Click any model row to cross-filter · Hover <code className="font-mono">(?)</code> headers for metric formulas
             </p>
           </div>
+          <button
+            type="button"
+            disabled={!modelBreakdown.length}
+            onClick={() =>
+              downloadCsv(
+                'antigravity_model_efficiency.csv',
+                [
+                  'key_id',
+                  'label',
+                  'provider',
+                  'requests',
+                  'active_users',
+                  'avg_prompt_tokens',
+                  'long_context_pct',
+                  'cache_hit_rate_pct',
+                  'overage_share_pct',
+                  'total_tokens',
+                  'cache_savings_usd',
+                  'estimated_cost_usd',
+                ],
+                modelBreakdown
+              )
+            }
+            className="self-start sm:self-auto inline-flex items-center gap-1.5 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-3 py-1.5 text-xs font-semibold transition-colors shadow-sm disabled:opacity-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            CSV
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">

@@ -12,7 +12,7 @@ export default function InsightsBanner({
   if (loading || !kpis) return null;
 
   const latestVersionObj = clientVersions.find((v) => v.key_id && v.key_id !== 'unknown');
-  const latestVersionTag = latestVersionObj?.label || 'v2.32.1';
+  const latestVersionTag = latestVersionObj?.label || 'N/A';
   const totalVersionTurns = clientVersions.reduce((acc, r) => acc + Number(r.requests || 0), 0) || 1;
   const latestVersionShare = latestVersionObj
     ? Math.round((Number(latestVersionObj.requests || 0) / totalVersionTurns) * 100)

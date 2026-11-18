@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,98 +17,11 @@ import requests
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
-DEFAULT_PRICING_RATES = [
-    {
-        "model_id": "claude-opus-5-5",
-        "display_name": "Claude Opus 5.5",
-        "provider": "Anthropic",
-        "input_usd_per_1m": 5.00,
-        "cached_input_usd_per_1m": 0.50,
-        "output_usd_per_1m": 25.00,
-        "thinking_usd_per_1m": 25.00,
-    },
-    {
-        "model_id": "claude-sonnet-5-5",
-        "display_name": "Claude Sonnet 5.5",
-        "provider": "Anthropic",
-        "input_usd_per_1m": 3.00,
-        "cached_input_usd_per_1m": 0.30,
-        "output_usd_per_1m": 15.00,
-        "thinking_usd_per_1m": 15.00,
-    },
-    {
-        "model_id": "gemini-4-carbon",
-        "display_name": "Gemini 4 Carbon",
-        "provider": "Google",
-        "input_usd_per_1m": 2.00,
-        "cached_input_usd_per_1m": 0.25,
-        "output_usd_per_1m": 12.00,
-        "thinking_usd_per_1m": 12.00,
-    },
-    {
-        "model_id": "gemini-4-argon",
-        "display_name": "Gemini 4 Argon",
-        "provider": "Google",
-        "input_usd_per_1m": 1.50,
-        "cached_input_usd_per_1m": 0.20,
-        "output_usd_per_1m": 8.00,
-        "thinking_usd_per_1m": 8.00,
-    },
-    {
-        "model_id": "gemini-4-hydrogen",
-        "display_name": "Gemini 4 Hydrogen",
-        "provider": "Google",
-        "input_usd_per_1m": 1.50,
-        "cached_input_usd_per_1m": 0.20,
-        "output_usd_per_1m": 8.00,
-        "thinking_usd_per_1m": 8.00,
-    },
-    {
-        "model_id": "gemini-3.8-flash",
-        "display_name": "Gemini 3.8 Flash",
-        "provider": "Google",
-        "input_usd_per_1m": 0.30,
-        "cached_input_usd_per_1m": 0.04,
-        "output_usd_per_1m": 2.50,
-        "thinking_usd_per_1m": 2.50,
-    },
-    {
-        "model_id": "gemini-3.5-flash-lite",
-        "display_name": "Gemini 3.5 Flash Lite",
-        "provider": "Google",
-        "input_usd_per_1m": 0.10,
-        "cached_input_usd_per_1m": 0.025,
-        "output_usd_per_1m": 0.40,
-        "thinking_usd_per_1m": 0.40,
-    },
-    {
-        "model_id": "gemini-2.5-pro",
-        "display_name": "Gemini 2.5 Pro",
-        "provider": "Google",
-        "input_usd_per_1m": 1.25,
-        "cached_input_usd_per_1m": 0.125,
-        "output_usd_per_1m": 10.00,
-        "thinking_usd_per_1m": 10.00,
-    },
-    {
-        "model_id": "gemini-2.5-flash",
-        "display_name": "Gemini 2.5 Flash",
-        "provider": "Google",
-        "input_usd_per_1m": 0.30,
-        "cached_input_usd_per_1m": 0.03,
-        "output_usd_per_1m": 2.50,
-        "thinking_usd_per_1m": 2.50,
-    },
-    {
-        "model_id": "gemini-3-pro-image",
-        "display_name": "Gemini 3 Pro Image",
-        "provider": "Google",
-        "input_usd_per_1m": 2.00,
-        "cached_input_usd_per_1m": 0.25,
-        "output_usd_per_1m": 12.00,
-        "thinking_usd_per_1m": 12.00,
-    },
-]
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.telemetry_utils import DEFAULT_PRICING_RATES, get_gcp_credentials  # noqa: E402
 
 
 def ensure_dataset(bq: bigquery.Client, project_id: str, dataset_id: str, location: str, description: str) -> None:
@@ -127,8 +41,16 @@ def ensure_dataset(bq: bigquery.Client, project_id: str, dataset_id: str, locati
 def ensure_historical_table(bq: bigquery.Client, project_id: str, dataset_id: str) -> None:
     fqn = f"{project_id}.{dataset_id}.real_historical_inference_logs"
     try:
-        bq.get_table(fqn)
-        print(f"    Table {fqn} already exists.")
+        t = bq.get_table(fqn)
+        cols = {f.name for f in (t.schema or [])}
+        if "request_count" not in cols:
+            bq.query(
+                f"ALTER TABLE `{fqn}` ADD COLUMN IF NOT EXISTS request_count INT64",
+                job_config=bigquery.QueryJobConfig(labels={"datacloud": "antigravity"}),
+            ).result()
+            print(f"    Upgraded table {fqn} with request_count column.")
+        else:
+            print(f"    Table {fqn} already exists.")
         return
     except NotFound:
         pass
@@ -153,6 +75,7 @@ def ensure_historical_table(bq: bigquery.Client, project_id: str, dataset_id: st
         bigquery.SchemaField("thinking_tokens", "INT64"),
         bigquery.SchemaField("total_tokens", "INT64"),
         bigquery.SchemaField("tool_calls_count", "INT64"),
+        bigquery.SchemaField("request_count", "INT64"),
     ]
     table = bigquery.Table(fqn, schema=schema)
     table.time_partitioning = bigquery.TimePartitioning(
@@ -165,7 +88,7 @@ def ensure_historical_table(bq: bigquery.Client, project_id: str, dataset_id: st
     print(f"    Created partitioned & clustered table {fqn}.")
 
 
-def seed_pricing_rates(bq: bigquery.Client, project_id: str, dataset_id: str) -> None:
+def seed_pricing_rates(bq: bigquery.Client, project_id: str, dataset_id: str, refresh_existing: bool = False) -> None:
     fqn = f"{project_id}.{dataset_id}.model_pricing_rates"
     schema = [
         bigquery.SchemaField("model_id", "STRING"),
@@ -190,6 +113,20 @@ def seed_pricing_rates(bq: bigquery.Client, project_id: str, dataset_id: str) ->
         f"{r['output_usd_per_1m']}, {r['thinking_usd_per_1m']})"
         for r in DEFAULT_PRICING_RATES
     )
+    matched_clause = (
+        """
+    WHEN MATCHED THEN
+      UPDATE SET
+        display_name = S.display_name,
+        provider = S.provider,
+        input_usd_per_1m = S.input_usd_per_1m,
+        cached_input_usd_per_1m = S.cached_input_usd_per_1m,
+        output_usd_per_1m = S.output_usd_per_1m,
+        thinking_usd_per_1m = S.thinking_usd_per_1m
+        """
+        if refresh_existing
+        else ""
+    )
     merge_sql = f"""
     MERGE `{fqn}` T
     USING (
@@ -207,12 +144,13 @@ def seed_pricing_rates(bq: bigquery.Client, project_id: str, dataset_id: str) ->
       ])
     ) S
     ON T.model_id = S.model_id
+    {matched_clause}
     WHEN NOT MATCHED THEN
       INSERT (model_id, display_name, provider, input_usd_per_1m, cached_input_usd_per_1m, output_usd_per_1m, thinking_usd_per_1m)
       VALUES (S.model_id, S.display_name, S.provider, S.input_usd_per_1m, S.cached_input_usd_per_1m, S.output_usd_per_1m, S.thinking_usd_per_1m)
     """
     bq.query(merge_sql, job_config=bigquery.QueryJobConfig(labels={"datacloud": "antigravity"})).result()
-    print(f"    Seeded default token pricing rates into {fqn} (existing custom rates preserved).")
+    print(f"    Seeded {len(DEFAULT_PRICING_RATES)} default model pricing rates into {fqn}.")
 
 
 def sync_project_directory(bq: bigquery.Client, project_id: str, dataset_id: str) -> None:
@@ -223,8 +161,9 @@ def sync_project_directory(bq: bigquery.Client, project_id: str, dataset_id: str
     ]
     rows: list[dict[str, Any]] = []
     try:
-        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        creds.refresh(google.auth.transport.requests.Request())
+        creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        if not creds.token:
+            creds.refresh(google.auth.transport.requests.Request())
         resp = requests.get(
             "https://cloudresourcemanager.googleapis.com/v1/projects",
             headers={"Authorization": f"Bearer {creds.token}"},
@@ -292,7 +231,6 @@ def deploy_analytical_views(
             bq.query(stmt, job_config=bigquery.QueryJobConfig(labels={"datacloud": "antigravity"})).result()
         print("    Created/updated full analytical views (historical + live org sink).")
     else:
-        # Bootstrap views over real_historical_inference_logs first (backend dynamically unions live sink as soon as it arrives)
         v_events_sql = f"""
         CREATE OR REPLACE VIEW `{project_id}.{monitoring_dataset}.v_antigravity_events` AS
         WITH deduped AS (
@@ -314,15 +252,17 @@ def deploy_analytical_views(
             WHEN 'antigravity_hub' THEN 'Antigravity Hub'
             WHEN 'antigravity_cli' THEN 'Antigravity CLI (agy)'
             WHEN 'antigravity_ide' THEN 'Antigravity IDE'
+            WHEN 'vertex_ai' THEN 'Vertex AI API'
+            WHEN 'gemini_api' THEN 'Gemini API (AI Studio)'
             ELSE INITCAP(REPLACE(d.client_name, '_', ' '))
           END AS surface,
           d.client_version,
           d.experience,
           CASE
-            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-max$') THEN 'Max Effort'
-            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-high$') THEN 'High Effort'
-            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-medium$') THEN 'Medium Effort'
-            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-lite$|-low$') THEN 'Lite Effort'
+            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-max|\\(max\\)|\\bmax\\b)$') THEN 'Max Effort'
+            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-xhigh|-high|\\(high\\)|\\bhigh\\b|\\bxhigh\\b)$') THEN 'High Effort'
+            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-medium|\\(medium\\)|\\bmedium\\b)$') THEN 'Medium Effort'
+            WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-lite|-low|-minimal|\\(low\\)|\\(lite\\))$') THEN 'Lite Effort'
             ELSE 'Standard'
           END AS effort_level,
           d.quota_type,
@@ -330,7 +270,8 @@ def deploy_analytical_views(
             WHEN 'OVERAGE_QUOTA' THEN 'OVERAGE_QUOTA'
             ELSE 'REGULAR_QUOTA'
           END AS quota_tier,
-          IF(d.prompt_tokens > 200000, 1, 0) AS is_long_context,
+          GREATEST(1, COALESCE(SAFE_CAST(d.request_count AS INT64), 1)) AS request_count,
+          IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, COALESCE(SAFE_CAST(d.request_count AS INT64), 1))) > 200000, 1, 0) AS is_long_context,
           d.tool_calls_count,
           d.prompt_tokens,
           GREATEST(0, d.prompt_tokens - d.cached_tokens) AS uncached_prompt_tokens,
@@ -339,14 +280,21 @@ def deploy_analytical_views(
           d.thinking_tokens,
           d.total_tokens,
           ROUND(
-            (GREATEST(0, d.prompt_tokens - d.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
-            + (d.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+            (
+              (GREATEST(0, d.prompt_tokens - d.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
+              + (d.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+            ) * IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, COALESCE(SAFE_CAST(d.request_count AS INT64), 1))) > 200000, 2.0, 1.0)
             + (d.output_tokens * COALESCE(r.output_usd_per_1m, 8.00) / 1000000.0)
             + (d.thinking_tokens * COALESCE(r.thinking_usd_per_1m, 8.00) / 1000000.0),
             6
           ) AS estimated_cost_usd,
           ROUND(
-            (d.cached_tokens * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20)) / 1000000.0),
+            (
+              d.cached_tokens
+              * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20))
+              * IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, COALESCE(SAFE_CAST(d.request_count AS INT64), 1))) > 200000, 2.0, 1.0)
+              / 1000000.0
+            ),
             6
           ) AS cache_savings_usd
         FROM deduped d
@@ -363,17 +311,18 @@ def main() -> None:
     parser.add_argument("--location", default=os.getenv("BQ_LOCATION", "US"), help="BigQuery dataset location (e.g. US, EU)")
     parser.add_argument("--monitoring-dataset", default=os.getenv("MONITORING_DATASET", "antigravity_monitoring"))
     parser.add_argument("--raw-dataset", default=os.getenv("RAW_LOGS_DATASET", "antigravity_raw_logs"))
+    parser.add_argument("--refresh-pricing", action="store_true", help="Also update existing rows in model_pricing_rates")
     args = parser.parse_args()
 
     project_id = args.project.strip()
+    creds, detected = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     if not project_id:
-        _, detected = google.auth.default()
         project_id = detected or ""
     if not project_id:
         raise SystemExit("Error: --project or GCP_PROJECT_ID is required.")
 
     print(f"==> Bootstrapping BigQuery analytics foundation in project '{project_id}' ({args.location})...")
-    bq = bigquery.Client(project=project_id)
+    bq = bigquery.Client(project=project_id, credentials=creds)
 
     ensure_dataset(
         bq,
@@ -390,7 +339,7 @@ def main() -> None:
         "Antigravity Organization Usage & FinOps curated tables and views",
     )
     ensure_historical_table(bq, project_id, args.monitoring_dataset)
-    seed_pricing_rates(bq, project_id, args.monitoring_dataset)
+    seed_pricing_rates(bq, project_id, args.monitoring_dataset, refresh_existing=args.refresh_pricing)
     sync_project_directory(bq, project_id, args.monitoring_dataset)
     deploy_analytical_views(bq, project_id, args.monitoring_dataset, args.raw_dataset)
     print("BigQuery foundation ready.")

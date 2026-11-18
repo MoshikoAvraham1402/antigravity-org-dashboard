@@ -12,7 +12,13 @@ frontend/package-lock.json
 docs/
 terraform/
 scripts/
+tests/
+.pytest_cache/
+.github/
 install.sh
 cloudbuild.yaml
 README.md
+CONTRIBUTING.md
 LICENSE
+pyproject.toml
+requirements-dev.txt

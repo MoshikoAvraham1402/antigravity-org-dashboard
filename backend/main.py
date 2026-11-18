@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import hmac
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 from google.oauth2 import id_token
 
+from backend.telemetry_utils import get_gcp_credentials, is_valid_dns_domain, parse_semver_key
+from backend.vertex_sync import collect_vertex_telemetry
+
 logger = logging.getLogger("antigravity.dashboard")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -36,12 +40,14 @@ SERVICE_NAME = os.getenv("K_SERVICE", "antigravity-usage-dashboard").strip()
 IS_CLOUD_RUN = bool(os.getenv("K_SERVICE"))
 
 ORG_ID = os.getenv("GCP_ORG_ID", "").strip()
-ORG_DOMAIN = os.getenv("GCP_ORG_DOMAIN", "").strip().lower()
+_RAW_ORG_DOMAIN = os.getenv("GCP_ORG_DOMAIN", "").strip().lower()
+ORG_DOMAIN = _RAW_ORG_DOMAIN if is_valid_dns_domain(_RAW_ORG_DOMAIN) else ""
 ORG_TIMEZONE = os.getenv("ORG_TIMEZONE", "UTC").strip()
 SINK_NAME = os.getenv("LOGGING_SINK_NAME", "antigravity-org-bq-sink").strip()
 
 MONITORING_DATASET = os.getenv("MONITORING_DATASET", "antigravity_monitoring").strip()
 RAW_LOGS_DATASET = os.getenv("RAW_LOGS_DATASET", "antigravity_raw_logs").strip()
+ENABLE_VERTEX_TELEMETRY = os.getenv("ENABLE_VERTEX_TELEMETRY", "true").lower() == "true"
 
 _BQ_FQN_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 _RAW_BILLING_TABLE = os.getenv("BILLING_EXPORT_TABLE", "").strip().strip("`")
@@ -55,10 +61,12 @@ LIVE_TEL_TABLE = "businessaicode_googleapis_com_client_telemetry"
 JOB_LABELS = {"datacloud": "antigravity"}
 MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", str(150 * 1024 * 1024)))  # Default 150 MB scan cap per query
 BQ_TIMEOUT_MS = 20_000
+MAX_SYNC_PAGES = max(1, min(25, int(os.getenv("MAX_SYNC_PAGES", "10"))))
 
 IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 EXPLICIT_IAP_AUDIENCE = os.getenv("IAP_AUDIENCE", "").strip()
 REQUIRE_IAP_AUTH = os.getenv("REQUIRE_IAP_AUTH", "false").lower() == "true"
+DASHBOARD_AUTH_TOKEN = os.getenv("DASHBOARD_AUTH_TOKEN", "").strip()
 
 _ALLOWED_DAYS = frozenset({7, 14, 30, 90})
 _SAFE_FILTER_RE = re.compile(r"^[A-Za-z0-9._ :()\-]{1,80}$")
@@ -92,7 +100,7 @@ SECURITY_HEADERS = {
 # Disable Swagger / ReDoc / OpenAPI schema exposure in production
 app = FastAPI(
     title="Antigravity Organization Intelligence Dashboard",
-    version="3.2.0",
+    version="3.3.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -127,7 +135,7 @@ def get_project_id() -> str:
         return PROJECT_ID
     if _resolved_project_id:
         return _resolved_project_id
-    _, detected = google.auth.default()
+    _, detected = get_gcp_credentials()
     if not detected:
         raise RuntimeError("GCP_PROJECT_ID environment variable is not set and could not be auto-detected.")
     _resolved_project_id = detected
@@ -139,15 +147,27 @@ def get_bq_client() -> bigquery.Client:
     if _bq_client is None:
         with _bq_init_lock:
             if _bq_client is None:
-                _bq_client = bigquery.Client(project=get_project_id())
+                creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                _bq_client = bigquery.Client(project=get_project_id(), credentials=creds)
     return _bq_client
 
 
-def _check_rate_limit(bucket_map: dict[str, collections.deque[float]], key: str, limit: int, window_sec: float = 60.0) -> bool:
+def _check_rate_limit(
+    bucket_map: dict[str, collections.deque[float]],
+    key: str,
+    limit: int,
+    window_sec: float = 60.0,
+) -> bool:
     now = time.monotonic()
     with _rate_lock:
         if len(bucket_map) > 4096:
-            bucket_map.clear()
+            expired = [k for k, d in bucket_map.items() if not d or (now - d[-1]) > window_sec]
+            for k in expired:
+                del bucket_map[k]
+            if len(bucket_map) > 4096:
+                oldest = sorted(bucket_map.items(), key=lambda item: item[1][-1] if item[1] else 0.0)[:1024]
+                for k, _ in oldest:
+                    del bucket_map[k]
         dq = bucket_map[key]
         while dq and (now - dq[0]) > window_sec:
             dq.popleft()
@@ -158,7 +178,13 @@ def _check_rate_limit(bucket_map: dict[str, collections.deque[float]], key: str,
 
 
 def verify_iap_assertion(request: Request) -> str:
-    """Verifies Google Cloud IAP ES256 JWT assertion if present or if REQUIRE_IAP_AUTH=true."""
+    """Verifies Google Cloud IAP ES256 JWT assertion (or optional DASHBOARD_AUTH_TOKEN)."""
+    if DASHBOARD_AUTH_TOKEN and request.url.path.startswith("/api/"):
+        auth_hdr = request.headers.get("authorization", "").strip()
+        token_val = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+        if not token_val or not hmac.compare_digest(token_val, DASHBOARD_AUTH_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid or missing dashboard bearer token.")
+
     assertion = request.headers.get("x-goog-iap-jwt-assertion", "").strip()
     if not assertion:
         if REQUIRE_IAP_AUTH and IS_CLOUD_RUN:
@@ -220,7 +246,7 @@ async def zero_trust_security_middleware(request: Request, call_next: Any) -> An
     path = request.url.path
 
     if path == "/api/health":
-        resp = JSONResponse({"status": "ok"})
+        resp = JSONResponse({"status": "ok", "version": app.version})
         for hk, hv in SECURITY_HEADERS.items():
             resp.headers[hk] = hv
         resp.headers["Cache-Control"] = "no-store, max-age=0"
@@ -359,8 +385,9 @@ def discover_accessible_projects(token: str | None = None) -> tuple[list[str], d
     discovered_ids: list[str] = list(env_projects)
     try:
         if not token:
-            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            creds.refresh(_google_auth_req)
+            creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            if not creds.token:
+                creds.refresh(_google_auth_req)
             token = creds.token
         resp = http_requests.get(
             "https://cloudresourcemanager.googleapis.com/v1/projects",
@@ -382,7 +409,7 @@ def discover_accessible_projects(token: str | None = None) -> tuple[list[str], d
 
     if host_project not in discovered_ids:
         discovered_ids.insert(0, host_project)
-    deduped_ids = list(dict.fromkeys(discovered_ids))[:40]  # Cap concurrent sync fan-out safely
+    deduped_ids = list(dict.fromkeys(discovered_ids))[:40]
 
     with _proj_discovery_lock:
         _proj_discovery_cache = (now, deduped_ids, num_map)
@@ -402,19 +429,20 @@ def inspect_sink_tables(refresh: bool = False) -> dict[str, Any]:
     hist_fqn = f"{proj_id}.{MONITORING_DATASET}.{HIST_REAL_TABLE}"
     pdir_fqn = f"{proj_id}.{MONITORING_DATASET}.{PROJECT_DIR_TABLE}"
 
-    def _check(fqn: str) -> tuple[bool, int]:
+    def _check(fqn: str) -> tuple[bool, int, set[str]]:
         try:
             t = client.get_table(fqn)
             base_rows = int(t.num_rows or 0)
             stream_rows = int(getattr(t.streaming_buffer, "estimated_rows", 0) or 0) if t.streaming_buffer else 0
-            return True, base_rows + stream_rows
+            cols = {f.name for f in (t.schema or [])}
+            return True, base_rows + stream_rows, cols
         except NotFound:
-            return False, 0
+            return False, 0, set()
 
-    live_resp_exists, live_resp_rows = _check(resp_fqn)
-    live_tel_exists, live_tel_rows = _check(tel_fqn)
-    hist_exists, hist_rows = _check(hist_fqn)
-    pdir_exists, _ = _check(pdir_fqn)
+    live_resp_exists, live_resp_rows, _ = _check(resp_fqn)
+    live_tel_exists, live_tel_rows, _ = _check(tel_fqn)
+    hist_exists, hist_rows, hist_cols = _check(hist_fqn)
+    pdir_exists, _, _ = _check(pdir_fqn)
 
     sink_scope = f"organizations/{ORG_ID}" if ORG_ID else f"projects/{proj_id}"
     status = {
@@ -424,9 +452,11 @@ def inspect_sink_tables(refresh: bool = False) -> dict[str, Any]:
         "live_tel_rows": live_tel_rows,
         "hist_exists": hist_exists,
         "hist_rows": hist_rows,
+        "has_request_count_col": "request_count" in hist_cols,
         "pdir_exists": pdir_exists,
         "live_table_fqn": resp_fqn,
         "sink_resource": f"{sink_scope}/sinks/{SINK_NAME}",
+        "vertex_telemetry_enabled": ENABLE_VERTEX_TELEMETRY,
     }
     return _set_cached(cache_key, status)
 
@@ -439,6 +469,7 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
     tel_join_cte = ""
 
     if status["hist_exists"]:
+        req_count_expr = "GREATEST(1, COALESCE(SAFE_CAST(request_count AS INT64), 1))" if status.get("has_request_count_col") else "1"
         branches.append(
             f"""
             SELECT
@@ -459,7 +490,8 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
               output_tokens,
               thinking_tokens,
               total_tokens,
-              tool_calls_count
+              tool_calls_count,
+              {req_count_expr} AS request_count
             FROM `{proj_id}.{MONITORING_DATASET}.{HIST_REAL_TABLE}`
             WHERE DATE(event_ts) >= DATE_SUB(CURRENT_DATE(), INTERVAL @lookback_days DAY)
             """
@@ -513,7 +545,8 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
               COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.candidatestokencount AS INT64), 0) AS output_tokens,
               COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.thoughtstokencount AS INT64), 0) AS thinking_tokens,
               COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.totaltokencount AS INT64), 0) AS total_tokens,
-              {tool_expr} AS tool_calls_count
+              {tool_expr} AS tool_calls_count,
+              1 AS request_count
             FROM `{proj_id}.{RAW_LOGS_DATASET}.{LIVE_RESP_TABLE}` r
             {tel_join_clause}
             {pdir_join_clause}
@@ -524,7 +557,6 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
     if branches:
         combined_body = "\nUNION ALL\n".join(branches)
     else:
-        # Clean empty state on brand-new installation prior to first inference event
         combined_body = """
         SELECT
           CAST(NULL AS STRING) AS request_id,
@@ -544,7 +576,8 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
           0 AS output_tokens,
           0 AS thinking_tokens,
           0 AS total_tokens,
-          0 AS tool_calls_count
+          0 AS tool_calls_count,
+          1 AS request_count
         FROM UNNEST(ARRAY<INT64>[])
         """
 
@@ -565,13 +598,15 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
           WHEN 'antigravity_hub' THEN 'Antigravity Hub'
           WHEN 'antigravity_cli' THEN 'Antigravity CLI (agy)'
           WHEN 'antigravity_ide' THEN 'Antigravity IDE'
+          WHEN 'vertex_ai' THEN 'Vertex AI API'
+          WHEN 'gemini_api' THEN 'Gemini API (AI Studio)'
           ELSE INITCAP(REPLACE(e.client_name, '_', ' '))
         END AS surface,
         CASE
-          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'-max$') THEN 'Max Effort'
-          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'-high$') THEN 'High Effort'
-          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'-medium$') THEN 'Medium Effort'
-          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'-lite$|-low$') THEN 'Lite Effort'
+          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'(-max|\\(max\\)|\\bmax\\b)$') THEN 'Max Effort'
+          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'(-xhigh|-high|\\(high\\)|\\bhigh\\b|\\bxhigh\\b)$') THEN 'High Effort'
+          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'(-medium|\\(medium\\)|\\bmedium\\b)$') THEN 'Medium Effort'
+          WHEN REGEXP_CONTAINS(LOWER(COALESCE(e.experience, '')), r'(-lite|-low|-minimal|\\(low\\)|\\(lite\\))$') THEN 'Lite Effort'
           ELSE 'Standard'
         END AS effort_level,
         CASE COALESCE(e.quota_type, '')
@@ -582,18 +617,25 @@ def build_real_events_cte(refresh: bool = False) -> tuple[str, dict[str, Any]]:
           WHEN 'OVERAGE_QUOTA' THEN 'Overage (Pay-As-You-Go)'
           ELSE 'Included Subscription'
         END AS quota_label,
-        IF(e.prompt_tokens > 200000, 1, 0) AS is_long_context,
+        IF(SAFE_DIVIDE(e.prompt_tokens, GREATEST(1, e.request_count)) > 200000, 1, 0) AS is_long_context,
         GREATEST(0, e.prompt_tokens - e.cached_tokens) AS uncached_prompt_tokens,
         COALESCE(r.display_name, INITCAP(REPLACE(e.model_id, '-', ' '))) AS model_display_name,
         ROUND(
-          (GREATEST(0, e.prompt_tokens - e.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
-          + (e.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+          (
+            (GREATEST(0, e.prompt_tokens - e.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
+            + (e.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+          ) * IF(SAFE_DIVIDE(e.prompt_tokens, GREATEST(1, e.request_count)) > 200000, 2.0, 1.0)
           + (e.output_tokens * COALESCE(r.output_usd_per_1m, 8.00) / 1000000.0)
           + (e.thinking_tokens * COALESCE(r.thinking_usd_per_1m, 8.00) / 1000000.0),
           6
         ) AS estimated_cost_usd,
         ROUND(
-          (e.cached_tokens * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20)) / 1000000.0),
+          (
+            e.cached_tokens
+            * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20))
+            * IF(SAFE_DIVIDE(e.prompt_tokens, GREATEST(1, e.request_count)) > 200000, 2.0, 1.0)
+            / 1000000.0
+          ),
           6
         ) AS cache_savings_usd
       FROM deduped_events e
@@ -640,7 +682,7 @@ def run_query(
 
 
 def sync_recent_cloud_logging_delta() -> dict[str, Any]:
-    """Pulls sub-minute Cloud Logging entries across accessible org projects with global cooldown."""
+    """Pulls incremental Antigravity Cloud Logging + Vertex Monitoring telemetry into BigQuery."""
     global _last_global_sync_mono
     with _sync_exec_lock:
         now_mono = time.monotonic()
@@ -652,18 +694,18 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
         client = get_bq_client()
         cte_sql, status = build_real_events_cte(refresh=True)
         if not status["hist_exists"]:
-            return {"inserted_rows": 0, "scanned_entries": 0}
+            return {"inserted_rows": 0, "scanned_entries": 0, "vertex_rows": 0}
 
         recent_sql = f"""
         WITH {cte_sql}
         SELECT
           MAX(event_ts) AS max_ts,
-          ARRAY_AGG(DISTINCT request_id LIMIT 5000) AS recent_ids
+          ARRAY_AGG(DISTINCT request_id LIMIT 50000) AS recent_ids
         FROM deduped_events
-        WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 6 HOUR)
+        WHERE event_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
         """
         recent_params = [
-            bigquery.ScalarQueryParameter("lookback_days", "INT64", 2),
+            bigquery.ScalarQueryParameter("lookback_days", "INT64", 4),
             bigquery.ScalarQueryParameter("project", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("surface", "STRING", "ALL"),
             bigquery.ScalarQueryParameter("model", "STRING", "ALL"),
@@ -695,34 +737,46 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
         cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         try:
-            creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-            creds.refresh(_google_auth_req)
+            creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            if not creds.token:
+                creds.refresh(_google_auth_req)
             token = creds.token
         except Exception as exc:
             logger.warning("Cloud Logging credential refresh skipped: %s", exc)
-            return {"inserted_rows": 0, "scanned_entries": 0}
+            return {"inserted_rows": 0, "scanned_entries": 0, "vertex_rows": 0}
 
         target_projects, num_map = discover_accessible_projects(token=token)
         headers = {"Authorization": f"Bearer {token}"}
 
         def _fetch_recent(proj: str, log_id_encoded: str) -> list[dict[str, Any]]:
-            try:
-                resp = http_requests.post(
-                    "https://logging.googleapis.com/v2/entries:list",
-                    headers=headers,
-                    json={
+            entries: list[dict[str, Any]] = []
+            page_token: str | None = None
+            for _ in range(MAX_SYNC_PAGES):
+                try:
+                    payload: dict[str, Any] = {
                         "resourceNames": [f"projects/{proj}"],
                         "filter": f'logName="projects/{proj}/logs/{log_id_encoded}" AND timestamp>="{cutoff_iso}"',
                         "orderBy": "timestamp desc",
                         "pageSize": 250,
-                    },
-                    timeout=6,
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("entries", [])
-            except Exception:
-                pass
-            return []
+                    }
+                    if page_token:
+                        payload["pageToken"] = page_token
+                    resp = http_requests.post(
+                        "https://logging.googleapis.com/v2/entries:list",
+                        headers=headers,
+                        json=payload,
+                        timeout=8,
+                    )
+                    if resp.status_code != 200:
+                        break
+                    data = resp.json()
+                    entries.extend(data.get("entries", []))
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+                except Exception:
+                    break
+            return entries
 
         tel_entries: list[dict[str, Any]] = []
         resp_entries: list[dict[str, Any]] = []
@@ -790,13 +844,27 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
                     "thinking_tokens": thought_tok,
                     "total_tokens": total_tok,
                     "tool_calls_count": int(tool_calls_by_req.get(req_id, 0)),
+                    "request_count": 1,
                 }
             )
+
+        vertex_rows: list[dict[str, Any]] = []
+        if ENABLE_VERTEX_TELEMETRY and token:
+            try:
+                vertex_rows = collect_vertex_telemetry(token, target_projects, days=2, existing_ids=existing_ids)
+                new_rows.extend(vertex_rows)
+            except Exception as exc:
+                logger.debug("Vertex telemetry incremental sync skipped: %s", exc)
+
+        if not status.get("has_request_count_col"):
+            for r in new_rows:
+                r.pop("request_count", None)
 
         inserted = 0
         if new_rows:
             hist_fqn = f"{proj_id}.{MONITORING_DATASET}.{HIST_REAL_TABLE}"
-            errors = client.insert_rows_json(hist_fqn, new_rows)
+            row_ids = [r["request_id"] for r in new_rows]
+            errors = client.insert_rows_json(hist_fqn, new_rows, row_ids=row_ids)
             if not errors:
                 inserted = len(new_rows)
             else:
@@ -805,6 +873,8 @@ def sync_recent_cloud_logging_delta() -> dict[str, Any]:
         return {
             "inserted_rows": inserted,
             "scanned_entries": len(resp_entries),
+            "vertex_rows": len(vertex_rows),
+            "projects_scanned": len(target_projects),
         }
 
 
@@ -827,7 +897,7 @@ def _compute_dashboard_payload(
     viewer_email: str,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    cache_key = f"real_dash_v4:{days}:{project}:{surface}:{model}:{provider}:{quota}:{effort}"
+    cache_key = f"real_dash_v5:{days}:{project}:{surface}:{model}:{provider}:{quota}:{effort}"
     cached = _get_cached(cache_key, refresh=force_refresh)
     if cached is not None:
         out = dict(cached)
@@ -835,7 +905,7 @@ def _compute_dashboard_payload(
         return out
 
     proj_id = get_project_id()
-    lookback_days = max(days * 2 + 5, days + 35)
+    lookback_days = max(days * 2 + 10, days + 35)
     cte_sql, sink_status = build_real_events_cte(refresh=force_refresh)
 
     base_params = [
@@ -867,23 +937,23 @@ def _compute_dashboard_payload(
       SELECT
         COUNT(DISTINCT user_email) AS active_users,
         COUNT(DISTINCT project_id) AS active_projects,
-        COUNT(1) AS total_requests,
+        COALESCE(SUM(request_count), 0) AS total_requests,
         COUNT(DISTINCT NULLIF(session_id, '')) AS total_sessions,
         COALESCE(SUM(tool_calls_count), 0) AS total_tool_calls,
-        COUNTIF(tool_calls_count > 0) AS tool_assisted_turns,
-        ROUND(SAFE_DIVIDE(COUNTIF(tool_calls_count > 0), COUNT(1)) * 100, 1) AS tool_assisted_pct,
-        ROUND(SAFE_DIVIDE(SUM(tool_calls_count), COUNT(1)), 2) AS avg_tools_per_turn,
-        COUNTIF(quota_tier = 'OVERAGE_QUOTA') AS overage_requests,
-        COUNTIF(quota_tier = 'REGULAR_QUOTA') AS regular_requests,
-        ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
+        COALESCE(SUM(IF(tool_calls_count > 0, request_count, 0)), 0) AS tool_assisted_turns,
+        ROUND(SAFE_DIVIDE(SUM(IF(tool_calls_count > 0, request_count, 0)), SUM(request_count)) * 100, 1) AS tool_assisted_pct,
+        ROUND(SAFE_DIVIDE(SUM(tool_calls_count), SUM(request_count)), 2) AS avg_tools_per_turn,
+        COALESCE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), 0) AS overage_requests,
+        COALESCE(SUM(IF(quota_tier = 'REGULAR_QUOTA', request_count, 0)), 0) AS regular_requests,
+        ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1) AS overage_share_pct,
         COALESCE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', total_tokens, 0)), 0) AS overage_tokens,
         COALESCE(ROUND(SUM(IF(quota_tier = 'OVERAGE_QUOTA', estimated_cost_usd, 0)), 2), 0) AS overage_cost_usd,
-        COALESCE(SUM(is_long_context), 0) AS long_context_turns,
-        ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
-        CAST(ROUND(COALESCE(AVG(prompt_tokens), 0)) AS INT64) AS avg_prompt_tokens,
-        COALESCE(APPROX_QUANTILES(prompt_tokens, 100)[OFFSET(50)], 0) AS p50_prompt_tokens,
-        COALESCE(APPROX_QUANTILES(prompt_tokens, 100)[OFFSET(95)], 0) AS p95_prompt_tokens,
-        COALESCE(MAX(prompt_tokens), 0) AS max_prompt_tokens,
+        COALESCE(SUM(IF(is_long_context = 1, request_count, 0)), 0) AS long_context_turns,
+        ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1) AS long_context_pct,
+        CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+        COALESCE(APPROX_QUANTILES(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64), 100)[OFFSET(50)], 0) AS p50_prompt_tokens,
+        COALESCE(APPROX_QUANTILES(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64), 100)[OFFSET(95)], 0) AS p95_prompt_tokens,
+        COALESCE(MAX(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64)), 0) AS max_prompt_tokens,
         COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
         COALESCE(SUM(uncached_prompt_tokens), 0) AS uncached_prompt_tokens,
         COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
@@ -899,7 +969,7 @@ def _compute_dashboard_payload(
     sess_per_id AS (
       SELECT
         session_id AS sid,
-        COUNT(1) AS sess_turns
+        SUM(request_count) AS sess_turns
       FROM win
       WHERE NULLIF(session_id, '') IS NOT NULL
       GROUP BY 1
@@ -915,7 +985,7 @@ def _compute_dashboard_payload(
     prev AS (
       SELECT
         COUNT(DISTINCT user_email) AS prev_active_users,
-        COUNT(1) AS prev_requests,
+        COALESCE(SUM(request_count), 0) AS prev_requests,
         COALESCE(SUM(total_tokens), 0) AS prev_tokens,
         COALESCE(ROUND(SUM(estimated_cost_usd), 2), 0) AS prev_cost_usd
       FROM priced_events, anchor
@@ -925,7 +995,7 @@ def _compute_dashboard_payload(
     SELECT
       anchor.max_date AS max_date,
       anchor.latest_event_ts AS latest_event_ts,
-      (SELECT MIN(event_date) FROM win) AS min_date,
+      COALESCE((SELECT MIN(event_date) FROM win), DATE_SUB(anchor.max_date, INTERVAL (@days - 1) DAY)) AS min_date,
       curr.*,
       sess_stats.*,
       prev.*
@@ -941,10 +1011,9 @@ def _compute_dashboard_payload(
       SELECT DISTINCT event_date, user_email FROM priced_events
     ),
     window_dates AS (
-      SELECT DISTINCT event_date
-      FROM priced_events, anchor
-      WHERE event_date > DATE_SUB(anchor.max_date, INTERVAL @days DAY)
-        AND event_date <= anchor.max_date
+      SELECT d AS event_date
+      FROM anchor,
+      UNNEST(GENERATE_DATE_ARRAY(DATE_SUB(anchor.max_date, INTERVAL (@days - 1) DAY), anchor.max_date)) AS d
     ),
     rolling AS (
       SELECT
@@ -953,57 +1022,57 @@ def _compute_dashboard_payload(
         COUNT(DISTINCT IF(u.event_date BETWEEN DATE_SUB(w.event_date, INTERVAL 6 DAY) AND w.event_date, u.user_email, NULL)) AS wau_7d,
         COUNT(DISTINCT IF(u.event_date BETWEEN DATE_SUB(w.event_date, INTERVAL 27 DAY) AND w.event_date, u.user_email, NULL)) AS mau_28d
       FROM window_dates w
-      JOIN daily_users u
+      LEFT JOIN daily_users u
         ON u.event_date BETWEEN DATE_SUB(w.event_date, INTERVAL 27 DAY) AND w.event_date
       GROUP BY w.event_date
     ),
     agg AS (
       SELECT
         event_date,
-        COUNT(1) AS requests,
+        COALESCE(SUM(request_count), 0) AS requests,
         COUNT(DISTINCT NULLIF(session_id, '')) AS sessions,
-        SUM(tool_calls_count) AS tool_calls,
-        COUNTIF(quota_tier = 'OVERAGE_QUOTA') AS overage_requests,
-        COUNTIF(quota_tier = 'REGULAR_QUOTA') AS regular_requests,
-        SUM(is_long_context) AS long_context_turns,
-        CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-        SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
-        SUM(cached_tokens) AS cached_tokens,
-        SUM(output_tokens) AS output_tokens,
-        SUM(thinking_tokens) AS thinking_tokens,
-        SUM(total_tokens) AS total_tokens,
-        ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-        ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
-        ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
+        COALESCE(SUM(tool_calls_count), 0) AS tool_calls,
+        COALESCE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), 0) AS overage_requests,
+        COALESCE(SUM(IF(quota_tier = 'REGULAR_QUOTA', request_count, 0)), 0) AS regular_requests,
+        COALESCE(SUM(IF(is_long_context = 1, request_count, 0)), 0) AS long_context_turns,
+        CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+        COALESCE(SUM(uncached_prompt_tokens), 0) AS uncached_prompt_tokens,
+        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+        COALESCE(ROUND(SUM(estimated_cost_usd), 2), 0) AS estimated_cost_usd,
+        COALESCE(ROUND(SUM(cache_savings_usd), 2), 0) AS cache_savings_usd
       FROM priced_events, anchor
       WHERE event_date > DATE_SUB(anchor.max_date, INTERVAL @days DAY)
         AND event_date <= anchor.max_date
       GROUP BY event_date
     )
     SELECT
-      a.event_date AS date,
+      r.event_date AS date,
       r.dau,
       r.wau_7d,
       r.mau_28d,
-      ROUND(SAFE_DIVIDE(r.dau, r.mau_28d) * 100, 1) AS stickiness_pct,
-      a.requests,
-      a.sessions,
-      a.tool_calls,
-      a.overage_requests,
-      a.regular_requests,
-      a.long_context_turns,
-      a.avg_prompt_tokens,
-      a.uncached_prompt_tokens,
-      a.cached_tokens,
-      a.output_tokens,
-      a.thinking_tokens,
-      a.total_tokens,
-      a.cache_hit_rate_pct,
-      a.estimated_cost_usd,
-      a.cache_savings_usd
-    FROM agg a
-    JOIN rolling r ON a.event_date = r.event_date
-    ORDER BY a.event_date ASC
+      COALESCE(ROUND(SAFE_DIVIDE(r.dau, r.mau_28d) * 100, 1), 0) AS stickiness_pct,
+      COALESCE(a.requests, 0) AS requests,
+      COALESCE(a.sessions, 0) AS sessions,
+      COALESCE(a.tool_calls, 0) AS tool_calls,
+      COALESCE(a.overage_requests, 0) AS overage_requests,
+      COALESCE(a.regular_requests, 0) AS regular_requests,
+      COALESCE(a.long_context_turns, 0) AS long_context_turns,
+      COALESCE(a.avg_prompt_tokens, 0) AS avg_prompt_tokens,
+      COALESCE(a.uncached_prompt_tokens, 0) AS uncached_prompt_tokens,
+      COALESCE(a.cached_tokens, 0) AS cached_tokens,
+      COALESCE(a.output_tokens, 0) AS output_tokens,
+      COALESCE(a.thinking_tokens, 0) AS thinking_tokens,
+      COALESCE(a.total_tokens, 0) AS total_tokens,
+      COALESCE(a.cache_hit_rate_pct, 0) AS cache_hit_rate_pct,
+      COALESCE(a.estimated_cost_usd, 0) AS estimated_cost_usd,
+      COALESCE(a.cache_savings_usd, 0) AS cache_savings_usd
+    FROM rolling r
+    LEFT JOIN agg a ON a.event_date = r.event_date
+    ORDER BY r.event_date ASC
     """
 
     breakdown_sql = f"""
@@ -1021,7 +1090,7 @@ def _compute_dashboard_payload(
       model_id AS key_id,
       ANY_VALUE(model_display_name) AS label,
       ANY_VALUE(model_provider) AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1029,10 +1098,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1043,7 +1112,7 @@ def _compute_dashboard_payload(
       surface AS key_id,
       surface AS label,
       '' AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1051,10 +1120,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1065,7 +1134,7 @@ def _compute_dashboard_payload(
       model_provider AS key_id,
       model_provider AS label,
       model_provider AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1073,10 +1142,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1087,7 +1156,7 @@ def _compute_dashboard_payload(
       effort_level AS key_id,
       effort_level AS label,
       '' AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1095,10 +1164,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1109,7 +1178,7 @@ def _compute_dashboard_payload(
       quota_tier AS key_id,
       ANY_VALUE(quota_label) AS label,
       '' AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1117,10 +1186,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1129,9 +1198,9 @@ def _compute_dashboard_payload(
     SELECT
       'client_version' AS dimension_type,
       COALESCE(NULLIF(client_version, ''), 'unknown') AS key_id,
-      CONCAT('v', COALESCE(NULLIF(client_version, ''), 'unknown')) AS label,
+      IF(NULLIF(client_version, '') IS NULL, 'unknown', CONCAT('v', client_version)) AS label,
       '' AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1139,10 +1208,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1153,7 +1222,7 @@ def _compute_dashboard_payload(
       project_id AS key_id,
       project_id AS label,
       '' AS provider,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       COUNT(DISTINCT user_email) AS active_users,
       SUM(tool_calls_count) AS tool_calls,
       SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
@@ -1161,10 +1230,10 @@ def _compute_dashboard_payload(
       SUM(output_tokens) AS output_tokens,
       SUM(thinking_tokens) AS thinking_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
-      CAST(ROUND(AVG(prompt_tokens)) AS INT64) AS avg_prompt_tokens,
-      ROUND(SAFE_DIVIDE(SUM(is_long_context), COUNT(1)) * 100, 1) AS long_context_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
+      CAST(ROUND(COALESCE(SAFE_DIVIDE(SUM(prompt_tokens), GREATEST(1, SUM(request_count))), 0)) AS INT64) AS avg_prompt_tokens,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(is_long_context = 1, request_count, 0)), SUM(request_count)) * 100, 1), 0) AS long_context_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM filtered
@@ -1179,7 +1248,7 @@ def _compute_dashboard_payload(
     SELECT
       EXTRACT(DAYOFWEEK FROM event_ts AT TIME ZONE '{ORG_TIMEZONE}') AS dow,
       EXTRACT(HOUR FROM event_ts AT TIME ZONE '{ORG_TIMEZONE}') AS hour_of_day,
-      COUNT(1) AS requests,
+      SUM(request_count) AS requests,
       SUM(total_tokens) AS total_tokens,
       COUNT(DISTINCT user_email) AS active_users,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd
@@ -1205,12 +1274,12 @@ def _compute_dashboard_payload(
       MIN(event_ts) AS started_at,
       MAX(event_ts) AS last_event_ts,
       GREATEST(1, TIMESTAMP_DIFF(MAX(event_ts), MIN(event_ts), MINUTE)) AS duration_min,
-      COUNT(1) AS turns,
+      SUM(request_count) AS turns,
       SUM(tool_calls_count) AS tool_calls,
-      MAX(prompt_tokens) AS peak_context_tokens,
+      MAX(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64)) AS peak_context_tokens,
       SUM(total_tokens) AS total_tokens,
-      ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 0) AS overage_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+      COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 0), 0) AS overage_pct,
       ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
       ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
     FROM priced_events, anchor
@@ -1246,21 +1315,21 @@ def _compute_dashboard_payload(
         APPROX_TOP_COUNT(NULLIF(client_version, ''), 1)[OFFSET(0)].value AS latest_client_version,
         COUNT(DISTINCT event_date) AS active_days,
         MAX(event_ts) AS last_active_ts,
-        COUNT(1) AS requests,
+        SUM(request_count) AS requests,
         COUNT(DISTINCT NULLIF(session_id, '')) AS total_sessions,
         COUNT(DISTINCT NULLIF(session_id, '')) AS sessions,
         SUM(tool_calls_count) AS tool_calls,
-        ROUND(SAFE_DIVIDE(SUM(tool_calls_count), COUNT(1)), 2) AS avg_tools_per_turn,
-        MAX(prompt_tokens) AS peak_context_tokens,
-        SUM(is_long_context) AS long_context_turns,
-        ROUND(SAFE_DIVIDE(COUNTIF(quota_tier = 'OVERAGE_QUOTA'), COUNT(1)) * 100, 1) AS overage_share_pct,
+        ROUND(SAFE_DIVIDE(SUM(tool_calls_count), SUM(request_count)), 2) AS avg_tools_per_turn,
+        MAX(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64)) AS peak_context_tokens,
+        SUM(IF(is_long_context = 1, request_count, 0)) AS long_context_turns,
+        COALESCE(ROUND(SAFE_DIVIDE(SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)), SUM(request_count)) * 100, 1), 0) AS overage_share_pct,
         SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
         SUM(cached_tokens) AS cached_tokens,
         SUM(output_tokens) AS output_tokens,
         SUM(thinking_tokens) AS thinking_tokens,
         SUM(total_tokens) AS total_tokens,
-        ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
-        ROUND(SAFE_DIVIDE(SUM(thinking_tokens), SUM(total_tokens)) * 100, 1) AS thinking_ratio_pct,
+        COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
+        COALESCE(ROUND(SAFE_DIVIDE(SUM(thinking_tokens), SUM(total_tokens)) * 100, 1), 0) AS thinking_ratio_pct,
         ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
         ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
       FROM window_events
@@ -1296,7 +1365,7 @@ def _compute_dashboard_payload(
           service.description AS service_name,
           sku.description AS sku_description,
           CASE
-            WHEN REGEXP_CONTAINS(LOWER(sku.description), r'subscription|code assist|gemini enterprise') THEN 'Subscription Seat'
+            WHEN REGEXP_CONTAINS(LOWER(sku.description), r'subscription|code assist|gemini enterprise|seat') THEN 'Subscription Seat'
             WHEN REGEXP_CONTAINS(LOWER(sku.description), r'cache') THEN 'Prompt Caching SKU'
             WHEN REGEXP_CONTAINS(LOWER(sku.description), r'200001|long context') THEN 'Long Context (>200K)'
             ELSE 'Model Inference SKU'
@@ -1305,14 +1374,15 @@ def _compute_dashboard_payload(
           ROUND(SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS credits_usd,
           ROUND(SUM(cost) + SUM(COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)), 2) AS net_cost_usd
         FROM `{BILLING_TABLE}`
-        WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL (@days + 3) DAY)
-          AND DATE(usage_start_time) > DATE_SUB(CURRENT_DATE(), INTERVAL @days DAY)
-          AND REGEXP_CONTAINS(LOWER(CONCAT(service.description, ' ', sku.description)), r'gemini enterprise|code assist|claude|gemini')
+        WHERE _PARTITIONTIME >= TIMESTAMP_SUB(TIMESTAMP(@anchor_max_date), INTERVAL (@days + 3) DAY)
+          AND DATE(usage_start_time) > DATE_SUB(@anchor_max_date, INTERVAL @days DAY)
+          AND DATE(usage_start_time) <= @anchor_max_date
+          AND REGEXP_CONTAINS(LOWER(CONCAT(service.description, ' ', sku.description)), r'gemini enterprise|code assist|antigravity|vertex ai|generative|claude|gemini|anthropic|cloud speech')
           AND NOT REGEXP_CONTAINS(LOWER(sku.description), r'colab|persistent disk|storage|network')
         GROUP BY 1, 2, 3
         HAVING ABS(gross_cost_usd) >= 0.01 OR ABS(net_cost_usd) >= 0.01
         ORDER BY gross_cost_usd DESC
-        LIMIT 25
+        LIMIT 30
         """
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -1323,16 +1393,6 @@ def _compute_dashboard_payload(
         f_traj = pool.submit(run_query, trajectories_sql, base_params, force_refresh)
         f_users = pool.submit(run_query, users_sql, base_params, force_refresh)
         f_facets = pool.submit(run_query, facets_sql, base_params, force_refresh)
-        f_bill = (
-            pool.submit(
-                run_query,
-                billing_skus_sql,
-                [bigquery.ScalarQueryParameter("days", "INT64", days)],
-                force_refresh,
-            )
-            if billing_skus_sql
-            else None
-        )
 
         kpi_rows = f_kpi.result()
         daily_rows = f_daily.result()
@@ -1341,14 +1401,23 @@ def _compute_dashboard_payload(
         traj_rows = f_traj.result()
         user_rows = f_users.result()
         facet_rows = f_facets.result()
-        billing_skus: list[dict[str, Any]] = []
-        if f_bill is not None:
-            try:
-                billing_skus = f_bill.result()
-            except Exception as bill_exc:
-                logger.warning("Billing SKU query fallback: %s", bill_exc)
 
     kpi_raw = kpi_rows[0] if kpi_rows else {}
+    anchor_max_date = kpi_raw.get("max_date") or datetime.now(timezone.utc).date().isoformat()
+    billing_skus: list[dict[str, Any]] = []
+    if billing_skus_sql:
+        try:
+            billing_skus = run_query(
+                billing_skus_sql,
+                [
+                    bigquery.ScalarQueryParameter("days", "INT64", days),
+                    bigquery.ScalarQueryParameter("anchor_max_date", "DATE", anchor_max_date),
+                ],
+                force_refresh,
+            )
+        except Exception as bill_exc:
+            logger.warning("Billing SKU query fallback: %s", bill_exc)
+
     latest_point = daily_rows[-1] if daily_rows else {}
 
     invoice_gross_usd = round(sum(float(r.get("gross_cost_usd") or 0.0) for r in billing_skus), 2)
@@ -1370,7 +1439,7 @@ def _compute_dashboard_payload(
     cache_savings = float(kpi_raw.get("cache_savings_usd") or 0.0)
     hypothetical_uncached_cost = est_cost + cache_savings
     cost_avoidance_pct = round((cache_savings / hypothetical_uncached_cost) * 100.0, 1) if hypothetical_uncached_cost > 0 else 0.0
-    observed_days = max(1, len(daily_rows))
+    observed_days = max(1, sum(1 for d in daily_rows if int(d.get("requests") or 0) > 0) or len(daily_rows))
 
     kpis = {
         "active_users_period": active_users,
@@ -1439,7 +1508,7 @@ def _compute_dashboard_payload(
     projects = _dim_sorted("project", "total_tokens")
     client_versions = sorted(
         [r for r in break_rows if r["dimension_type"] == "client_version"],
-        key=lambda x: str(x.get("key_id") or ""),
+        key=lambda x: parse_semver_key(str(x.get("key_id") or "")),
         reverse=True,
     )
 
@@ -1456,6 +1525,7 @@ def _compute_dashboard_payload(
             "raw_logs_dataset": RAW_LOGS_DATASET,
             "billing_enabled": bool(BILLING_TABLE),
             "billing_table": BILLING_TABLE,
+            "vertex_telemetry_enabled": ENABLE_VERTEX_TELEMETRY,
             "active_source": "live",
             "sink_status": sink_status,
             "days": days,
@@ -1568,6 +1638,8 @@ def sync_telemetry_now(
             "status": "synced",
             "synced_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "delta_logs_ingested": int(delta_info.get("inserted_rows") or 0),
+            "vertex_rows_ingested": int(delta_info.get("vertex_rows") or 0),
+            "projects_scanned": int(delta_info.get("projects_scanned") or 0),
             "live_sink_rows": int(dashboard["meta"]["sink_status"].get("live_resp_rows") or 0),
             "total_turns_in_window": int(dashboard["kpis"].get("total_requests") or 0),
             "latest_event_ts": dashboard["meta"].get("latest_event_ts"),
@@ -1587,7 +1659,7 @@ def get_user_drilldown(
 ) -> dict[str, Any]:
     safe_days = validate_days(days)
     decoded_email = validate_user_email(user_email)
-    cache_key = f"real_user_v4:{decoded_email}:{safe_days}"
+    cache_key = f"real_user_v5:{decoded_email}:{safe_days}"
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
@@ -1613,7 +1685,7 @@ def get_user_drilldown(
         )
         SELECT
           event_date AS date,
-          COUNT(1) AS requests,
+          SUM(request_count) AS requests,
           SUM(tool_calls_count) AS tool_calls,
           SUM(total_tokens) AS total_tokens,
           SUM(cached_tokens) AS cached_tokens,
@@ -1642,7 +1714,7 @@ def get_user_drilldown(
         SELECT
           'model' AS kind,
           ANY_VALUE(model_display_name) AS name,
-          COUNT(1) AS requests,
+          SUM(request_count) AS requests,
           SUM(total_tokens) AS total_tokens,
           ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd
         FROM u
@@ -1651,7 +1723,7 @@ def get_user_drilldown(
         SELECT
           'surface' AS kind,
           surface AS name,
-          COUNT(1) AS requests,
+          SUM(request_count) AS requests,
           SUM(total_tokens) AS total_tokens,
           ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd
         FROM u
@@ -1660,7 +1732,7 @@ def get_user_drilldown(
         SELECT
           'effort' AS kind,
           effort_level AS name,
-          COUNT(1) AS requests,
+          SUM(request_count) AS requests,
           SUM(total_tokens) AS total_tokens,
           ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd
         FROM u
@@ -1679,9 +1751,9 @@ def get_user_drilldown(
           ANY_VALUE(project_id) AS project_id,
           ANY_VALUE(surface) AS surface,
           ANY_VALUE(model_display_name) AS model_display_name,
-          COUNT(1) AS turns,
+          SUM(request_count) AS turns,
           SUM(tool_calls_count) AS tool_calls,
-          MAX(prompt_tokens) AS peak_context_tokens,
+          MAX(CAST(ROUND(SAFE_DIVIDE(prompt_tokens, GREATEST(1, request_count))) AS INT64)) AS peak_context_tokens,
           SUM(total_tokens) AS total_tokens,
           ROUND(SUM(estimated_cost_usd), 3) AS estimated_cost_usd
         FROM priced_events, anchor

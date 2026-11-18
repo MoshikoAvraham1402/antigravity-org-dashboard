@@ -1,5 +1,5 @@
 import React from 'react';
-import { GitBranch, Gauge, Wrench, Clock } from 'lucide-react';
+import { GitBranch, Gauge, Wrench, Clock, Download } from 'lucide-react';
 import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
@@ -8,6 +8,7 @@ import {
   formatDurationMin,
   formatTimestamp,
 } from '../utils/formatters';
+import { downloadCsv } from '../utils/csv';
 
 export default function TrajectoriesView({
   kpis,
@@ -133,13 +134,44 @@ export default function TrajectoriesView({
 
       {/* Top Autonomous Trajectories Explorer */}
       <div className="bg-white dark:bg-[#0c0c0f] border border-zinc-200/90 dark:border-zinc-800/90 rounded-[12px] shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800">
-          <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
-            Top Autonomous Agent Trajectories (Metadata Only)
-          </h3>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Highest-volume real coding &amp; research trajectories across the organization — click any row to inspect the engineer’s full profile
-          </p>
+        <div className="p-4 border-b border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-base font-bold tracking-tight text-zinc-950 dark:text-zinc-50">
+              Top Autonomous Agent Trajectories (Metadata Only)
+            </h3>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Highest-volume real coding &amp; research trajectories across the organization — click any row to inspect the engineer’s full profile
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={!trajectories.length}
+            onClick={() =>
+              downloadCsv(
+                'antigravity_top_trajectories.csv',
+                [
+                  'trajectory_id',
+                  'user_email',
+                  'project_id',
+                  'surface',
+                  'primary_model',
+                  'primary_effort',
+                  'duration_min',
+                  'turns',
+                  'tool_calls',
+                  'peak_context_tokens',
+                  'total_tokens',
+                  'cache_hit_rate_pct',
+                  'estimated_cost_usd',
+                ],
+                trajectories
+              )
+            }
+            className="self-start sm:self-auto inline-flex items-center gap-1.5 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-3 py-1.5 text-xs font-semibold transition-colors shadow-sm disabled:opacity-50"
+          >
+            <Download className="w-3.5 h-3.5" />
+            CSV
+          </button>
         </div>
 
         <div className="overflow-x-auto">

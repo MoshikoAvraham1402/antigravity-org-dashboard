@@ -3,6 +3,7 @@ locals {
     "run.googleapis.com",
     "bigquery.googleapis.com",
     "logging.googleapis.com",
+    "monitoring.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "iam.googleapis.com",
     "iap.googleapis.com",
@@ -90,7 +91,8 @@ resource "google_bigquery_table" "historical_logs" {
     { name = "output_tokens", type = "INT64", mode = "NULLABLE" },
     { name = "thinking_tokens", type = "INT64", mode = "NULLABLE" },
     { name = "total_tokens", type = "INT64", mode = "NULLABLE" },
-    { name = "tool_calls_count", type = "INT64", mode = "NULLABLE" }
+    { name = "tool_calls_count", type = "INT64", mode = "NULLABLE" },
+    { name = "request_count", type = "INT64", mode = "NULLABLE" }
   ])
 }
 
@@ -195,6 +197,13 @@ resource "google_project_iam_member" "bq_job_user" {
 resource "google_project_iam_member" "host_logging_viewer" {
   project = var.project_id
   role    = "roles/logging.viewer"
+  member  = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+}
+
+resource "google_project_iam_member" "host_monitoring_viewer" {
+  count   = var.enable_vertex_telemetry ? 1 : 0
+  project = var.project_id
+  role    = "roles/monitoring.viewer"
   member  = "serviceAccount:${google_service_account.dashboard_runtime.email}"
 }
 
@@ -310,6 +319,10 @@ resource "google_cloud_run_v2_service" "dashboard" {
       env {
         name  = "REQUIRE_IAP_AUTH"
         value = var.allow_public_access ? "false" : "true"
+      }
+      env {
+        name  = "ENABLE_VERTEX_TELEMETRY"
+        value = var.enable_vertex_telemetry ? "true" : "false"
       }
     }
   }

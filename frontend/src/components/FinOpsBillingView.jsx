@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
-import { Receipt, Sparkles, CreditCard, BadgePercent, Search } from 'lucide-react';
+import { Receipt, Sparkles, CreditCard, BadgePercent, Search, Download } from 'lucide-react';
 import MetricTooltip from './MetricTooltip';
 import {
   formatCompactNumber,
@@ -8,6 +8,7 @@ import {
   formatShortDate,
   formatReadableDate,
 } from '../utils/formatters';
+import { downloadCsv } from '../utils/csv';
 
 export default function FinOpsBillingView({
   kpis,
@@ -259,16 +260,33 @@ export default function FinOpsBillingView({
             </p>
           </div>
 
-          <div className="relative w-full sm:w-64">
-            <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="text"
-              maxLength={80}
-              value={skuSearch}
-              onChange={(e) => setSkuSearch(e.target.value)}
-              placeholder="Filter SKU or service..."
-              className="w-full bg-white dark:bg-[#09090b] border border-zinc-200 dark:border-zinc-800 rounded-[8px] pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-zinc-950 dark:text-zinc-100"
-            />
+          <div className="flex items-center gap-2">
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                maxLength={80}
+                value={skuSearch}
+                onChange={(e) => setSkuSearch(e.target.value)}
+                placeholder="Filter SKU or service..."
+                className="w-full bg-white dark:bg-[#09090b] border border-zinc-200 dark:border-zinc-800 rounded-[8px] pl-8 pr-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-zinc-950 dark:text-zinc-100"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={!filteredSkus.length}
+              onClick={() =>
+                downloadCsv(
+                  'antigravity_billing_skus.csv',
+                  ['service_name', 'sku_description', 'billing_category', 'gross_cost_usd', 'credits_usd', 'net_cost_usd'],
+                  filteredSkus
+                )
+              }
+              className="inline-flex items-center gap-1.5 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-3 py-1.5 text-xs font-semibold transition-colors shadow-sm disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              CSV
+            </button>
           </div>
         </div>
 

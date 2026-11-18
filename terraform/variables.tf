@@ -97,3 +97,9 @@ variable "deletion_protection" {
   type        = bool
   default     = true
 }
+
+variable "enable_vertex_telemetry" {
+  description = "Enable Cloud Monitoring sync for Vertex AI & Gemini API consumption alongside Enterprise Antigravity logs."
+  type        = bool
+  default     = true
+}

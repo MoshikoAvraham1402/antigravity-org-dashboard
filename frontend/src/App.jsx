@@ -29,6 +29,7 @@ import TrajectoriesView from './components/TrajectoriesView';
 import DeveloperTable from './components/DeveloperTable';
 import DeveloperDrawer from './components/DeveloperDrawer';
 import SinkSetupModal from './components/SinkSetupModal';
+import EmptyOnboardingBanner from './components/EmptyOnboardingBanner';
 import { formatReadableDate, formatTimestamp, formatClockTime } from './utils/formatters';
 
 const apiClient = axios.create({
@@ -52,7 +53,14 @@ const WORKSPACE_TABS = [
 ];
 
 export default function App() {
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ag_dashboard_theme');
+      return saved ? saved === 'dark' : true;
+    } catch {
+      return true;
+    }
+  });
   const [activeTab, setActiveTab] = useState('overview');
 
   const [days, setDays] = useState(30);
@@ -83,6 +91,11 @@ export default function App() {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
+    }
+    try {
+      localStorage.setItem('ag_dashboard_theme', darkMode ? 'dark' : 'light');
+    } catch {
+      // ignore storage failure
     }
   }, [darkMode]);
 
@@ -214,6 +227,20 @@ export default function App() {
   );
 
   const meta = data?.meta;
+  const sinkStatus = meta?.sink_status || {};
+  const hasLiveSinkRows = Number(sinkStatus.live_resp_rows || 0) > 0;
+  const hasAnyRows = hasLiveSinkRows || Number(sinkStatus.hist_rows || 0) > 0 || Number(data?.kpis?.total_requests || 0) > 0;
+
+  const sinkBadgeCls = hasLiveSinkRows
+    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
+    : hasAnyRows
+    ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-400 dark:border-blue-800/60 hover:bg-blue-100 dark:hover:bg-blue-900/40'
+    : 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/40';
+  const sinkBadgeLabel = hasLiveSinkRows
+    ? 'Live Sink Active'
+    : hasAnyRows
+    ? 'Telemetry Connected'
+    : 'Setup Needed · 0 Events';
 
   const activeFilters = useMemo(
     () => ({ project, surface, model, provider, quota, effort }),
@@ -295,10 +322,10 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setSinkModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-colors"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold border transition-colors ${sinkBadgeCls}`}
                 >
-                  <Radio className="w-3 h-3 animate-pulse" />
-                  Live Sink Active
+                  <Radio className={`w-3 h-3 ${hasAnyRows ? 'animate-pulse' : ''}`} />
+                  {sinkBadgeLabel}
                 </button>
                 {meta?.viewer_email && (
                   <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-zinc-100 text-zinc-700 border border-zinc-200 dark:bg-zinc-900 dark:text-zinc-300 dark:border-zinc-800">
@@ -413,6 +440,14 @@ export default function App() {
               disabled={loading || syncing}
             />
 
+            <FilterDropdown
+              label="Effort"
+              value={effort}
+              options={meta?.available_efforts || []}
+              onChange={setEffort}
+              disabled={loading || syncing}
+            />
+
             {hasActiveFilters && (
               <button
                 type="button"
@@ -499,6 +534,10 @@ export default function App() {
           onJumpTab={setActiveTab}
           loading={loading}
         />
+
+        {!loading && !error && data?.kpis?.total_requests === 0 && (
+          <EmptyOnboardingBanner meta={meta} onOpenSinkModal={() => setSinkModalOpen(true)} />
+        )}
 
         {/* Real-Time Data-Driven Executive Insights */}
         <InsightsBanner
@@ -676,7 +715,7 @@ export default function App() {
           <div className="flex items-center gap-1.5">
             <Shield className="w-3.5 h-3.5 text-emerald-500" />
             <span>
-              Hardened Public Runtime · Least-Privilege SA · 150MB Scan Cap · Prompt &amp; code response payloads excluded.
+              {meta?.viewer_email ? 'Zero-Trust IAP Runtime' : 'Hardened Cloud Run Runtime'} · Least-Privilege SA · 150MB Scan Cap · Prompt &amp; code payloads excluded.
             </span>
           </div>
           <button

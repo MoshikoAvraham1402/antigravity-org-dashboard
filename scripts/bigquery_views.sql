@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Antigravity Organization Usage & FinOps Analytical Views (GoogleSQL Template)
--- Variables substituted automatically by scripts/bootstrap_bigquery.py:
+-- Variables substituted automatically by scripts/bootstrap_bigquery.py / Terraform:
 --   ${PROJECT_ID}         -> Host GCP Project ID
 --   ${MONITORING_DATASET} -> Default: antigravity_monitoring
 --   ${RAW_LOGS_DATASET}   -> Default: antigravity_raw_logs
@@ -33,7 +33,8 @@ combined_raw AS (
     output_tokens,
     thinking_tokens,
     total_tokens,
-    tool_calls_count
+    tool_calls_count,
+    GREATEST(1, COALESCE(SAFE_CAST(request_count AS INT64), 1)) AS request_count
   FROM `${PROJECT_ID}.${MONITORING_DATASET}.real_historical_inference_logs`
   UNION ALL
   SELECT
@@ -54,7 +55,8 @@ combined_raw AS (
     COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.candidatestokencount AS INT64), 0) AS output_tokens,
     COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.thoughtstokencount AS INT64), 0) AS thinking_tokens,
     COALESCE(SAFE_CAST(r.jsonpayload_v1_inferenceresponselog.metadata.totaltokencount AS INT64), 0) AS total_tokens,
-    COALESCE(lt.tool_calls, 0) AS tool_calls_count
+    COALESCE(lt.tool_calls, 0) AS tool_calls_count,
+    1 AS request_count
   FROM `${PROJECT_ID}.${RAW_LOGS_DATASET}.businessaicode_googleapis_com_inference_response` r
   LEFT JOIN live_tel lt
     ON lt.req_id = COALESCE(r.labels.request_id, r.insertId)
@@ -80,15 +82,17 @@ SELECT
     WHEN 'antigravity_hub' THEN 'Antigravity Hub'
     WHEN 'antigravity_cli' THEN 'Antigravity CLI (agy)'
     WHEN 'antigravity_ide' THEN 'Antigravity IDE'
+    WHEN 'vertex_ai' THEN 'Vertex AI API'
+    WHEN 'gemini_api' THEN 'Gemini API (AI Studio)'
     ELSE INITCAP(REPLACE(d.client_name, '_', ' '))
   END AS surface,
   d.client_version,
   d.experience,
   CASE
-    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-max$') THEN 'Max Effort'
-    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-high$') THEN 'High Effort'
-    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-medium$') THEN 'Medium Effort'
-    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'-lite$|-low$') THEN 'Lite Effort'
+    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-max|\(max\)|\bmax\b)$') THEN 'Max Effort'
+    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-xhigh|-high|\(high\)|\bhigh\b|\bxhigh\b)$') THEN 'High Effort'
+    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-medium|\(medium\)|\bmedium\b)$') THEN 'Medium Effort'
+    WHEN REGEXP_CONTAINS(LOWER(COALESCE(d.experience, '')), r'(-lite|-low|-minimal|\(low\)|\(lite\))$') THEN 'Lite Effort'
     ELSE 'Standard'
   END AS effort_level,
   d.quota_type,
@@ -96,7 +100,8 @@ SELECT
     WHEN 'OVERAGE_QUOTA' THEN 'OVERAGE_QUOTA'
     ELSE 'REGULAR_QUOTA'
   END AS quota_tier,
-  IF(d.prompt_tokens > 200000, 1, 0) AS is_long_context,
+  d.request_count,
+  IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, d.request_count)) > 200000, 1, 0) AS is_long_context,
   d.tool_calls_count,
   d.prompt_tokens,
   GREATEST(0, d.prompt_tokens - d.cached_tokens) AS uncached_prompt_tokens,
@@ -105,14 +110,21 @@ SELECT
   d.thinking_tokens,
   d.total_tokens,
   ROUND(
-    (GREATEST(0, d.prompt_tokens - d.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
-    + (d.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+    (
+      (GREATEST(0, d.prompt_tokens - d.cached_tokens) * COALESCE(r.input_usd_per_1m, 1.50) / 1000000.0)
+      + (d.cached_tokens * COALESCE(r.cached_input_usd_per_1m, 0.20) / 1000000.0)
+    ) * IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, d.request_count)) > 200000, 2.0, 1.0)
     + (d.output_tokens * COALESCE(r.output_usd_per_1m, 8.00) / 1000000.0)
     + (d.thinking_tokens * COALESCE(r.thinking_usd_per_1m, 8.00) / 1000000.0),
     6
   ) AS estimated_cost_usd,
   ROUND(
-    (d.cached_tokens * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20)) / 1000000.0),
+    (
+      d.cached_tokens
+      * GREATEST(0, COALESCE(r.input_usd_per_1m, 1.50) - COALESCE(r.cached_input_usd_per_1m, 0.20))
+      * IF(SAFE_DIVIDE(d.prompt_tokens, GREATEST(1, d.request_count)) > 200000, 2.0, 1.0)
+      / 1000000.0
+    ),
     6
   ) AS cache_savings_usd
 FROM deduped d
@@ -142,18 +154,18 @@ rolling AS (
 daily_agg AS (
   SELECT
     event_date,
-    COUNT(1) AS requests,
+    SUM(request_count) AS requests,
     COUNT(DISTINCT NULLIF(session_id, '')) AS sessions,
     SUM(tool_calls_count) AS tool_calls,
-    COUNTIF(quota_tier = 'OVERAGE_QUOTA') AS overage_requests,
-    COUNTIF(quota_tier = 'REGULAR_QUOTA') AS regular_requests,
-    SUM(is_long_context) AS long_context_turns,
+    SUM(IF(quota_tier = 'OVERAGE_QUOTA', request_count, 0)) AS overage_requests,
+    SUM(IF(quota_tier = 'REGULAR_QUOTA', request_count, 0)) AS regular_requests,
+    SUM(IF(is_long_context = 1, request_count, 0)) AS long_context_turns,
     SUM(uncached_prompt_tokens) AS uncached_prompt_tokens,
     SUM(cached_tokens) AS cached_tokens,
     SUM(output_tokens) AS output_tokens,
     SUM(thinking_tokens) AS thinking_tokens,
     SUM(total_tokens) AS total_tokens,
-    ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1) AS cache_hit_rate_pct,
+    COALESCE(ROUND(SAFE_DIVIDE(SUM(cached_tokens), SUM(prompt_tokens)) * 100, 1), 0) AS cache_hit_rate_pct,
     ROUND(SUM(estimated_cost_usd), 2) AS estimated_cost_usd,
     ROUND(SUM(cache_savings_usd), 2) AS cache_savings_usd
   FROM `${PROJECT_ID}.${MONITORING_DATASET}.v_antigravity_events`
@@ -164,7 +176,7 @@ SELECT
   r.dau,
   r.wau_7d,
   r.mau_28d,
-  ROUND(SAFE_DIVIDE(r.dau, r.mau_28d) * 100, 1) AS stickiness_pct,
+  COALESCE(ROUND(SAFE_DIVIDE(r.dau, r.mau_28d) * 100, 1), 0) AS stickiness_pct,
   a.requests,
   a.sessions,
   a.tool_calls,

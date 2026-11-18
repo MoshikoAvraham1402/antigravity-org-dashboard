@@ -103,13 +103,21 @@ Click the button below to clone this repository directly inside **Google Cloud S
    - Host project: `Owner` or `Editor` + `Project IAM Admin` (`roles/resourcemanager.projectIamAdmin`) + `Cloud Run Admin` (`roles/run.admin`).
    - Organization level *(recommended for org-wide telemetry)*: `Logs Configuration Writer` (`roles/logging.configWriter`) on your GCP Organization so the aggregated sink captures all child projects automatically.
 
-#### Run the Turnkey Installer
+#### Run the Turnkey Installer (macOS / Linux / Cloud Shell or Windows)
 
 ```bash
 git clone https://github.com/MoshikoAvraham1402/antigravity-org-dashboard.git
 cd antigravity-org-dashboard
 
-# Deploy with Zero-Trust IAP enabled (Recommended for Enterprise internal access)
+# Cross-platform Python installer (Windows PowerShell, macOS, Linux, Cloud Shell):
+python scripts/install.py \
+  --project YOUR_HOST_PROJECT_ID \
+  --region us-central1 \
+  --bq-location US \
+  --timezone America/New_York \
+  --access iap
+
+# Or via Bash (Linux / macOS / Cloud Shell):
 ./install.sh \
   --project YOUR_HOST_PROJECT_ID \
   --org YOUR_GCP_ORG_ID \
@@ -119,7 +127,23 @@ cd antigravity-org-dashboard
   --access iap
 ```
 
-Want to link your **BigQuery Cloud Billing Export** table for invoice SKU reconciliation, or deploy with **Public URL access**?
+#### Individual Developers & Non-Org Projects (Vertex AI + Local Antigravity Sync)
+
+If you use Antigravity IDE/CLI with a personal Google account or run Vertex AI / Gemini API workloads in standalone GCP projects without a GCP Organization, you can populate the dashboard using **Vertex AI Monitoring** (enabled by default) and the **privacy-first local workstation metadata sync** (reads only token/model/timestamp metadata, never prompt text or code):
+
+```bash
+# Preview local workstation metrics without writing anything:
+python scripts/sync_local_antigravity.py --dry-run --days 30
+
+# Deploy & connect both Vertex AI Monitoring and local Antigravity session metadata:
+python scripts/install.py \
+  --project YOUR_HOST_PROJECT_ID \
+  --scan-projects YOUR_HOST_PROJECT_ID,YOUR_AI_PROJECT_ID \
+  --sync-local \
+  --access public
+```
+
+Want to link your **BigQuery Cloud Billing Export** table for invoice SKU reconciliation?
 
 ```bash
 ./install.sh \
@@ -132,13 +156,13 @@ Want to link your **BigQuery Cloud Billing Export** table for invoice SKU reconc
   --access public
 ```
 
-### What `install.sh` Automates End-to-End:
-1. Enables required GCP APIs (`run`, `cloudbuild`, `artifactregistry`, `bigquery`, `logging`, `cloudresourcemanager`, `iam`, `iap`).
+### What the Installer Automates End-to-End:
+1. Enables required GCP APIs (`run`, `cloudbuild`, `artifactregistry`, `bigquery`, `logging`, `monitoring`, `cloudresourcemanager`, `iam`, `iap`).
 2. Creates partitioned & clustered BigQuery datasets/tables (`antigravity_raw_logs`, `antigravity_monitoring`), seeds reference model token pricing (`model_pricing_rates`), maps org project numbers (`project_directory`), and deploys analytical views (`v_antigravity_events`, `v_daily_org_metrics`).
-3. Provisions an aggregated **Organization Cloud Logging Sink** (`includeChildren=true`) with dataset-scoped BigQuery `WRITER` IAM (automatically falls back to a project sink if you lack org-level permissions).
-4. Backfills the last **30 days** of historical Antigravity metadata from Cloud Logging across accessible projects.
+3. Provisions an aggregated **Organization / Folder / Project Cloud Logging Sink** with dataset-scoped BigQuery `WRITER` IAM.
+4. Backfills the last **30 days** of historical Antigravity metadata + optional Vertex AI / Gemini API Cloud Monitoring metrics across accessible projects.
 5. Builds and deploys the multi-stage non-root container (`Dockerfile`) to **Cloud Run**.
-6. Hardens runtime security: binds a dedicated least-privilege service account (`antigravity-dashboard-sa`), scopes BigQuery permissions strictly to the two dashboard datasets, caps scaling (`maxInstances=5`), and configures IAP or public ingress.
+6. Hardens runtime security: binds a dedicated least-privilege service account (`antigravity-dashboard-sa`), scopes BigQuery & Monitoring permissions strictly, caps scaling (`maxInstances=5`), and configures IAP or public ingress.
 
 ---
 
@@ -186,6 +210,8 @@ All backend settings in [`backend/main.py`](backend/main.py) are 100% environmen
 | `BILLING_EXPORT_TABLE` | No | `""` | Optional BigQuery Cloud Billing export FQN (`project.dataset.table`). When unset, FinOps SKU cards gracefully show setup instructions. |
 | `ORG_PROJECTS` | No | *(Auto-discovered)* | Optional comma-separated project IDs for `Sync Data`. When blank, active accessible projects are discovered dynamically via Cloud Resource Manager API. |
 | `REQUIRE_IAP_AUTH` | No | `false` | Set `true` behind Cloud Run IAP to enforce cryptographic ES256 JWT verification inside FastAPI. |
+| `DASHBOARD_AUTH_TOKEN` | No | `""` | Optional static Bearer token check on `/api/*` when deploying without IAP (`--access public`). |
+| `ENABLE_VERTEX_TELEMETRY` | No | `true` | Also ingest Vertex AI & Gemini API Cloud Monitoring usage during `Sync Data` and backfill. |
 | `MAX_BYTES_BILLED` | No | `157286400` (`150 MB`) | Hard per-query BigQuery bytes-billed safety ceiling. |
 
 ---
@@ -250,23 +276,32 @@ Every resource and BigQuery SQL job provisioned by `install.sh` and `terraform/`
 ## Repository Structure
 
 ```text
-├── install.sh                         # One-command turnkey customer GCP installer
+├── install.sh                         # Turnkey Bash GCP installer (Linux / macOS / Cloud Shell)
 ├── Dockerfile                         # Multi-stage Vite build + hardened non-root Python runtime
 ├── cloudbuild.yaml                    # Automated CI/CD pipeline for Cloud Build triggers
+├── pyproject.toml                     # Pytest configuration
 ├── requirements.txt                   # Pinned Python backend & provisioning dependencies
+├── requirements-dev.txt               # Dev & test dependencies (pytest, httpx)
 ├── .env.example                       # Documented customer environment variables template
+├── CONTRIBUTING.md                    # Open-source contribution & privacy guidelines
 ├── backend/
-│   └── main.py                        # Multi-tenant configurable FastAPI + BigQuery service
-├── frontend/                          # React 19 + Tailwind CSS + Apache ECharts SPA
+│   ├── main.py                        # Multi-tenant configurable FastAPI + BigQuery service
+│   ├── telemetry_utils.py             # SemVer sorting, effort normalization, pricing & protobuf utils
+│   └── vertex_sync.py                 # Optional Vertex AI & Gemini API Cloud Monitoring collector
+├── frontend/                          # React 19 + Tailwind CSS + Apache ECharts + Vitest SPA
 │   └── src/
 │       ├── App.jsx
+│       ├── utils/                     # Formatters, formula-safe CSV exporter & unit tests
 │       └── components/                # Executive, Models/Fleet, FinOps, Trajectories & Drawer views
 ├── scripts/
+│   ├── install.py                     # Cross-platform turnkey installer (Windows/macOS/Linux)
 │   ├── bootstrap_bigquery.py          # Idempotent dataset, table, pricing & SQL view bootstrapper
 │   ├── setup_org_sink.sh              # Org / Folder / Project Cloud Logging -> BigQuery sink script
-│   ├── backfill_real_logs.py          # Historical Cloud Logging metadata backfill (deduplicated)
+│   ├── backfill_real_logs.py          # Historical Antigravity + Vertex metadata backfill
+│   ├── sync_local_antigravity.py      # Privacy-first local workstation metadata sync
 │   ├── harden_cloud_run_security.py   # Runtime SA, dataset-scoped IAM & IAP/Public hardening
 │   └── bigquery_views.sql             # Reference templated SQL views
+├── tests/                             # Backend & local-sync pytest suites
 ├── terraform/                         # Declarative Terraform IaC module for enterprise platform teams
 └── docs/                              # Cloud Shell tutorial, Installation, Security & UI previews
 ```

@@ -25,6 +25,11 @@ crash.log
 *.tfvars.json
 !*.tfvars.example
 
+# Test & coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
 # OS & Editor files
 .DS_Store
 Thumbs.db

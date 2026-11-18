@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Applies Defense-in-Depth Cloud Run runtime security for the Antigravity Dashboard:
-1. Dedicated least-privilege runtime service account (antigravity-dashboard-sa) with dataset-scoped READER access
-   and table-scoped WRITER access strictly on real_historical_inference_logs (for Sync Data).
+1. Dedicated least-privilege runtime service account (antigravity-dashboard-sa) with:
+   - dataset-scoped READER access on raw_logs + monitoring (+ billing dataset if set)
+   - table-scoped WRITER access strictly on real_historical_inference_logs (for Sync Data)
+   - roles/bigquery.jobUser, roles/logging.viewer, and optional roles/monitoring.viewer
 2. Configurable ingress auth mode:
    - --access iap    (Default for enterprise installs: IAP Zero-Trust enabled, invokerIamDisabled=False)
    - --access public (Public web URL with invokerIamDisabled=True, protected by rate limits & 150MB BQ scan caps)
@@ -13,7 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import google.auth
@@ -22,14 +26,66 @@ import requests
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.telemetry_utils import get_gcp_credentials  # noqa: E402
+
 
 def get_headers() -> dict[str, str]:
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    creds.refresh(google.auth.transport.requests.Request())
+    creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    if not creds.token:
+        creds.refresh(google.auth.transport.requests.Request())
     return {"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"}
 
 
-def ensure_least_privilege_sa(headers: dict[str, str], project_id: str, sa_id: str, sa_email: str) -> None:
+def ensure_project_roles(headers: dict[str, str], project_id: str, sa_email: str, roles: tuple[str, ...]) -> None:
+    r_pol = requests.post(
+        f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}:getIamPolicy",
+        headers=headers,
+        json={},
+        timeout=15,
+    )
+    if r_pol.status_code in (403, 404, 429):
+        print(f"    Skipping IAM binding on project {project_id} (HTTP {r_pol.status_code}).")
+        return
+    r_pol.raise_for_status()
+    policy = r_pol.json()
+    bindings: list[dict[str, Any]] = policy.setdefault("bindings", [])
+    member = f"serviceAccount:{sa_email}"
+
+    changed = False
+    for role in roles:
+        found = next((b for b in bindings if b.get("role") == role and not b.get("condition")), None)
+        if found is None:
+            bindings.append({"role": role, "members": [member]})
+            changed = True
+        elif member not in found.setdefault("members", []):
+            found["members"].append(member)
+            changed = True
+
+    if changed:
+        r_set = requests.post(
+            f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}:setIamPolicy",
+            headers=headers,
+            json={"policy": policy},
+            timeout=15,
+        )
+        r_set.raise_for_status()
+        print(f"    Granted {', '.join(roles)} on {project_id} to {sa_email}.")
+    else:
+        print(f"    Project IAM on {project_id} already configured.")
+
+
+def ensure_least_privilege_sa(
+    headers: dict[str, str],
+    project_id: str,
+    sa_id: str,
+    sa_email: str,
+    include_monitoring: bool = True,
+    scan_projects: list[str] | None = None,
+) -> None:
     print(f"==> [1/3] Ensuring dedicated least-privilege Service Account {sa_email}...")
     sa_url = f"https://iam.googleapis.com/v1/projects/{project_id}/serviceAccounts/{sa_email}"
     r = requests.get(sa_url, headers=headers, timeout=15)
@@ -51,41 +107,17 @@ def ensure_least_privilege_sa(headers: dict[str, str], project_id: str, sa_id: s
     elif r.status_code != 200:
         r.raise_for_status()
 
-    r_pol = requests.post(
-        f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}:getIamPolicy",
-        headers=headers,
-        json={},
-        timeout=15,
-    )
-    if r_pol.status_code == 429:
-        print("    Project IAM policy rate-limited (429); skipping redundant project-level binding check.")
-        return
-    r_pol.raise_for_status()
-    policy = r_pol.json()
-    bindings: list[dict[str, Any]] = policy.setdefault("bindings", [])
-    member = f"serviceAccount:{sa_email}"
+    host_roles = ["roles/bigquery.jobUser", "roles/logging.viewer"]
+    if include_monitoring:
+        host_roles.append("roles/monitoring.viewer")
+    ensure_project_roles(headers, project_id, sa_email, tuple(host_roles))
 
-    changed = False
-    for role in ("roles/bigquery.jobUser", "roles/logging.viewer"):
-        found = next((b for b in bindings if b.get("role") == role and not b.get("condition")), None)
-        if found is None:
-            bindings.append({"role": role, "members": [member]})
-            changed = True
-        elif member not in found.setdefault("members", []):
-            found["members"].append(member)
-            changed = True
-
-    if changed:
-        r_set = requests.post(
-            f"https://cloudresourcemanager.googleapis.com/v1/projects/{project_id}:setIamPolicy",
-            headers=headers,
-            json={"policy": policy},
-            timeout=15,
-        )
-        r_set.raise_for_status()
-        print("    Granted roles/bigquery.jobUser and roles/logging.viewer to runtime SA.")
-    else:
-        print("    Service account & project-level IAM already configured.")
+    for extra_proj in (scan_projects or []):
+        if extra_proj and extra_proj != project_id:
+            extra_roles = ["roles/logging.viewer"]
+            if include_monitoring:
+                extra_roles.append("roles/monitoring.viewer")
+            ensure_project_roles(headers, extra_proj, sa_email, tuple(extra_roles))
 
 
 def grant_scoped_bigquery_access(
@@ -97,7 +129,8 @@ def grant_scoped_bigquery_access(
     billing_table: str = "",
 ) -> None:
     print("==> [2/3] Applying dataset- and table-scoped BigQuery IAM...")
-    bq = bigquery.Client(project=project_id)
+    creds, _ = get_gcp_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    bq = bigquery.Client(project=project_id, credentials=creds)
 
     datasets_to_grant = [
         (project_id, raw_dataset),
@@ -120,7 +153,6 @@ def grant_scoped_bigquery_access(
         except NotFound:
             print(f"    Dataset {ds_proj}.{ds_id} not found; skipping.")
 
-    # Grant table-scoped dataEditor strictly on real_historical_inference_logs for POST /api/sync
     hist_iam_url = (
         f"https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}"
         f"/datasets/{monitoring_dataset}/tables/real_historical_inference_logs:getIamPolicy"
@@ -210,7 +242,7 @@ def patch_cloud_run_service(
             break
 
     r_final = requests.get(svc_url, headers=headers, timeout=15).json()
-    print("✅ Cloud Run Hardened Configuration Active:")
+    print("[OK] Cloud Run Hardened Configuration Active:")
     print(
         json.dumps(
             {
@@ -237,18 +269,28 @@ def main() -> None:
     parser.add_argument("--raw-dataset", default=os.getenv("RAW_LOGS_DATASET", "antigravity_raw_logs"))
     parser.add_argument("--monitoring-dataset", default=os.getenv("MONITORING_DATASET", "antigravity_monitoring"))
     parser.add_argument("--billing-table", default=os.getenv("BILLING_EXPORT_TABLE", ""))
+    parser.add_argument("--scan-projects", default=os.getenv("ORG_PROJECTS", ""), help="Comma-separated projects to grant viewer roles on")
+    parser.add_argument("--no-monitoring", action="store_true", help="Do not bind roles/monitoring.viewer")
     args = parser.parse_args()
 
     project_id = args.project.strip()
     if not project_id:
-        _, detected = google.auth.default()
+        _, detected = get_gcp_credentials()
         project_id = detected or ""
     if not project_id:
         raise SystemExit("Error: --project or GCP_PROJECT_ID is required.")
 
     sa_email = f"{args.sa_id}@{project_id}.iam.gserviceaccount.com"
+    scan_list = [p.strip() for p in args.scan_projects.split(",") if p.strip()]
     hdrs = get_headers()
-    ensure_least_privilege_sa(hdrs, project_id, args.sa_id, sa_email)
+    ensure_least_privilege_sa(
+        hdrs,
+        project_id,
+        args.sa_id,
+        sa_email,
+        include_monitoring=not args.no_monitoring,
+        scan_projects=scan_list,
+    )
     grant_scoped_bigquery_access(
         hdrs,
         project_id,
